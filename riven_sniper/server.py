@@ -41,6 +41,9 @@ def create_server(monitor: Monitor, port: int = 8765) -> ThreadingHTTPServer:
             path = urlsplit(self.path).path
             if path == "/api/state":
                 self.json_reply(200, monitor.state())
+            elif path == "/api/diagnostic.json":
+                state = monitor.state()
+                self.json_reply(200, {key: state[key] for key in ("version", "mode", "config", "status", "clock")})
             elif path == "/api/export.csv":
                 self.reply(200, ("\ufeff" + monitor.export_csv()).encode(), "text/csv; charset=utf-8")
             elif path in ("/", "/app.js", "/styles.css"):

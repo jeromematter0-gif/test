@@ -1,10 +1,16 @@
 # Riven Sniper
 
+Version **0.2.0** : diagnostic des échecs de connexion et état de collecte explicite. La collecte réelle doit toujours être validée sur le PC ; cette mise à jour ne prouve pas à elle seule un accès fonctionnel à warframe.market.
+
 Prototype personnel de surveillance **Dual Toxocyst · PC · achat immédiat entre 10 et 2 000 pl inclus**. Aucune condition sur les stats, les rolls, la polarité ou le statut en ligne du vendeur. Le prix de départ d'une enchère ne compte pas comme un prix d'achat immédiat.
 
 Il affiche les annonces, émet un son et/ou une notification de navigateur après activation, conserve les détections dans SQLite et exporte un CSV. Le bouton **Aleca reçue** note manuellement l'arrivée de l'alerte concurrente pour la même annonce et le même événement de prix. Aucun compte warframe.market ni secret n'est nécessaire ; aucune interaction avec le jeu, aucun achat et aucun message automatique.
 
 ## Lancer sur ton PC Windows
+
+Avec Python 3.11 ou plus récent installé, tu peux maintenant **double-cliquer sur `Lancer-Riven-Sniper.cmd`**. Il prépare les dépendances puis ouvre le tableau. Conserver sa fenêtre ouverte pendant la surveillance.
+
+Pour mettre à jour : arrêter l'ancienne fenêtre avec Ctrl+C, extraire le nouveau ZIP dans un nouveau dossier et lancer le fichier de ce dossier. L'indicateur de version en haut du tableau doit afficher **02**. Les historiques de l'ancien dossier restent dans son sous-dossier `.riven-sniper/`.
 
 Installer Python **3.11 ou plus récent**, ouvrir un terminal dans le dossier du projet, puis :
 
@@ -33,6 +39,27 @@ python3 -m venv .venv
 ```
 
 Sur une machine avec navigateur local, ajouter `--open`. Dans le cloud, les requêtes locales servent à la validation ; aucun service n'est exposé publiquement. Le code est dans le checkout existant `/workspace/test`, sans worktree supplémentaire.
+
+## Aucune annonce et peu de tentatives
+
+Si « Dernier succès » reste vide et que la référence initiale n'est pas reçue, **aucune surveillance n'a encore pu fonctionner**. Le compteur compte des tentatives, pas des réponses réussies. Les échecs transitoires déclenchent des pauses de 2, 4, 8… jusqu'à 120 secondes. Cela explique environ 23 tentatives en plus de 30 minutes malgré la cible normale de 1 seconde. Attendre plus longtemps ne valide pas la connexion.
+
+La version 0.2 affiche les réussites et les échecs séparément, une bannière d'erreur persistante, « En pause » ou « Arrêtée » et le prochain essai. Une connexion échouée n'est plus présentée comme un radar qui se prépare. Le compteur de durée porte sur la dernière tentative, y compris un échec. La classification distingue DNS, refus de connexion, timeout, proxy, validation TLS et codes HTTP lorsque la cause est disponible. Les erreurs sont aussi imprimées dans le terminal.
+
+Pour obtenir le diagnostic du PC :
+
+1. Double-cliquer sur **`Diagnostic-Riven-Sniper.cmd`** dans le nouveau dossier. Cela fait une seule tentative HTTPS puis affiche un rapport JSON. Aucune surveillance n'est démarrée par cette commande.
+2. Copier ce rapport pour analyse. Il contient les types d'erreurs et les codes techniques, sans valeurs de proxy, variables d'environnement, cookies, identifiants ou historique des vendeurs. Une copie est enregistrée dans `.riven-sniper/diagnostic.json`.
+
+Équivalent dans un terminal :
+
+```powershell
+.\.venv\Scripts\python.exe -m riven_sniper --diagnose
+```
+
+Le bouton **Diagnostic** du tableau exporte aussi le statut courant sans historique, sans faire de nouvel appel externe. Un ancien message `ConnectError` ne permettait pas d'affirmer que la cause était un certificat : utiliser les détails de la nouvelle version pour le déterminer.
+
+La confiance HTTPS combine maintenant les certificats du système avec le paquet CA `certifi` déjà installé. Cela peut aider une installation Windows dont les racines système sont incomplètes ; ce n'est pas une preuve que la cause du PC était celle-là. La vérification du certificat et du nom d'hôte reste obligatoire. Une erreur de certificat confirmée arrête les essais en attendant une correction de la configuration.
 
 ## Comparer à AlecaFrame
 
@@ -84,7 +111,7 @@ python -m riven_sniper --min-price 10 --max-price 200 --interval 2 --open
 
 Les tests couvrent le filtrage, les événements et la persistance, la comparaison, les erreurs de l'API simulée et le serveur HTTP local. La démonstration permet d'exercer le parcours complet sans API externe. Ils ne prouvent ni l'accessibilité, ni la fraîcheur, ni les performances du flux réel.
 
-Validation réalisée : **43 tests réussis**, interface exercée dans Chromium, et parcours complet du vrai serveur local en simulation : initialisation silencieuse, détection d'une nouvelle offre, appariement Aleca avant détection avec delta négatif, puis export CSV. Le serveur réel affiche le refus d'accès et arrête sa collecte ; il ne simule pas une surveillance réussie.
+Validation réalisée : **53 tests réussis**, interface exercée dans Chromium, et parcours complet du vrai serveur local en simulation : initialisation silencieuse, détection d'une nouvelle offre, appariement Aleca avant détection avec delta négatif, puis export CSV. La régression « 23 tentatives en échec, 0 réussite » est reproduite sans attendre 30 minutes ; les tests vérifient les compteurs, la pause, le retour à la normale et les détails de connexion sans identifiants. Le serveur réel affiche le refus d'accès et arrête sa collecte ; il ne simule pas une surveillance réussie. Les lanceurs Windows sont fournis, mais leur exécution Windows n'a pas été testée dans ce cloud Linux.
 
 Dans ce cloud, les premières requêtes vers warframe.market ont été refusées par le proxy (`CONNECT 403`). Le client final reçoit maintenant une **page de protection du site en HTTP 403**, tout comme la documentation API : le service réel et sa vitesse ne sont pas validés. Aucun contournement n'est effectué. L'accès à l'API doit être accepté par le service ; ajouter un domaine réseau ne résout pas à lui seul cette protection. Le script peut être essayé sur ton PC, sous réserve des règles actuelles et de l'accès autorisé au service ; en cas de refus persistant, s'adresser à warframe.market plutôt que contourner sa protection.
 

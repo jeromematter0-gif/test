@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import csv
+import errno
 import io
 import json
 import math
 import re
 import sqlite3
+import socket
 import ssl
 import statistics
 import threading
@@ -20,8 +22,10 @@ from typing import Any
 from urllib.parse import urlsplit
 
 import httpx
+import certifi
 
 API_URL = "https://api.warframe.market/v1/auctions"
+VERSION = "0.2.0"
 
 
 def utc_now() -> str:
@@ -67,10 +71,65 @@ class Settings:
 
 
 class ApiFailure(Exception):
-    def __init__(self, message: str, *, retry_after: float | None = None, blocked: bool = False):
+    def __init__(self, message: str, *, retry_after: float | None = None, blocked: bool = False,
+                 kind: str = "api", http_status: int | None = None, duration_ms: float | None = None):
         super().__init__(message)
         self.retry_after = retry_after
         self.blocked = blocked
+        self.kind = kind
+        self.http_status = http_status
+        self.duration_ms = duration_ms
+
+
+def verified_ssl_context() -> ssl.SSLContext:
+    # Keep system / explicitly configured roots, and add the maintained CA bundle.
+    # This also supports fresh Windows installations with incomplete system roots.
+    context = ssl.create_default_context()
+    context.load_verify_locations(cafile=certifi.where())
+    return context
+
+
+def connection_failure(exc: httpx.HTTPError, duration_ms: float) -> ApiFailure:
+    """Classify the cause without exposing proxy URLs, credentials or raw errors."""
+    causes: list[BaseException] = []
+    cause: BaseException | None = exc
+    while cause is not None and all(cause is not item for item in causes):
+        causes.append(cause)
+        cause = cause.__cause__ or cause.__context__
+    if any(isinstance(cause, ssl.SSLCertVerificationError) for cause in causes):
+        return ApiFailure("Certificat HTTPS non vérifié. Vérifier la date du PC et les certificats du système/proxy. La vérification TLS reste activée.",
+                          blocked=True, kind="tls", duration_ms=duration_ms)
+    if any(isinstance(cause, socket.gaierror) for cause in causes):
+        return ApiFailure("Résolution DNS de l'API impossible. Vérifier la connexion et le DNS du PC.",
+                          kind="dns", duration_ms=duration_ms)
+    if any(isinstance(cause, OSError) and cause.errno in {errno.ECONNREFUSED, 10061} for cause in causes):
+        return ApiFailure("Connexion HTTPS refusée par le réseau ou le serveur. Vérifier le pare-feu, le proxy et l'accès à api.warframe.market.",
+                          kind="connection_refused", duration_ms=duration_ms)
+    if isinstance(exc, httpx.ProxyError):
+        return ApiFailure("Connexion au proxy refusée (ProxyError). Vérifier l'accès réseau/proxy, puis relancer.",
+                          blocked=True, kind="proxy", duration_ms=duration_ms)
+    if isinstance(exc, httpx.TimeoutException):
+        return ApiFailure(f"Délai de connexion API dépassé ({type(exc).__name__}). Aucun flux reçu pour cette tentative.",
+                          kind="timeout", duration_ms=duration_ms)
+    return ApiFailure(f"Connexion API impossible ({type(exc).__name__} : réseau, DNS ou TLS).",
+                      kind="network", duration_ms=duration_ms)
+
+
+def safe_failure_details(exc: BaseException) -> dict[str, Any]:
+    """Diagnostic identifiers only: never arbitrary exception messages/URLs."""
+    types: list[str] = []
+    network_codes: list[int] = []
+    certificate_codes: list[int] = []
+    seen: set[int] = set()
+    while exc is not None and id(exc) not in seen:
+        seen.add(id(exc))
+        types.append(type(exc).__name__)
+        if isinstance(exc, OSError) and isinstance(exc.errno, int):
+            network_codes.append(exc.errno)
+        if isinstance(exc, ssl.SSLCertVerificationError) and isinstance(getattr(exc, "verify_code", None), int):
+            certificate_codes.append(exc.verify_code)
+        exc = exc.__cause__ or exc.__context__
+    return {"exception_types": types, "network_codes": network_codes, "certificate_verify_codes": certificate_codes}
 
 
 def retry_delay(value: str | None, now: datetime | None = None) -> float | None:
@@ -92,11 +151,11 @@ class MarketClient:
         self.last_response_meta: dict[str, Any] = {}
         self.client = httpx.Client(
             headers={"Platform": "pc", "Language": "en", "Accept": "application/json",
-                     "User-Agent": "RivenSniper/0.1 (read-only personal monitor)"},
+                     "User-Agent": f"RivenSniper/{VERSION} (read-only personal monitor)"},
             timeout=httpx.Timeout(15, connect=10),
             limits=httpx.Limits(max_connections=1, max_keepalive_connections=1),
             follow_redirects=False,
-            verify=ssl.create_default_context(),
+            verify=verified_ssl_context(),
             transport=transport,
         )
 
@@ -108,13 +167,11 @@ class MarketClient:
             response = self.client.get(API_URL)
         except httpx.HTTPError as exc:
             # Proxy URLs and credentials must never leak through exception text.
-            blocked = isinstance(exc, httpx.ProxyError)
-            message = f"Connexion API impossible ({type(exc).__name__} : réseau, proxy, DNS ou TLS)."
-            if blocked:
-                message += " Vérifier l'accès réseau, puis relancer."
-            raise ApiFailure(message, blocked=blocked) from exc
+            elapsed = round((time.perf_counter() - start) * 1000, 2)
+            raise connection_failure(exc, elapsed) from exc
         elapsed = round((time.perf_counter() - start) * 1000, 2)
         self.last_response_meta = {
+            "last_http_status": response.status_code,
             "api_date": response.headers.get("Date"),
             "api_cache_age_seconds": retry_delay(response.headers.get("Age")),
             "api_cache_control": response.headers.get("Cache-Control"),
@@ -124,21 +181,24 @@ class MarketClient:
             raise ApiFailure(
                 ("Protection d'accès du site (HTTP 403). Collecte arrêtée, sans contournement. L'accès API doit être autorisé par le service."
                  if challenged else f"Accès API refusé (HTTP {response.status_code}). Vérifier les règles réseau ou l'accès au service, puis relancer."),
-                blocked=True,
+                blocked=True, kind="access", http_status=response.status_code, duration_ms=elapsed,
             )
         if response.status_code == 429:
             raise ApiFailure("Quota API atteint (429) : pause automatique.",
-                             retry_after=retry_delay(response.headers.get("Retry-After")))
+                             retry_after=retry_delay(response.headers.get("Retry-After")),
+                             kind="quota", http_status=429, duration_ms=elapsed)
         if response.status_code != 200:
             raise ApiFailure(f"Réponse API HTTP {response.status_code}. Aucun contournement effectué.",
                              retry_after=retry_delay(response.headers.get("Retry-After")),
-                             blocked=400 <= response.status_code < 500)
+                             blocked=400 <= response.status_code < 500,
+                             kind="http", http_status=response.status_code, duration_ms=elapsed)
         try:
             auctions = response.json()["payload"]["auctions"]
             if not isinstance(auctions, list) or any(not isinstance(a, dict) for a in auctions):
                 raise ValueError("Invalid auctions")
         except (ValueError, TypeError, KeyError) as exc:
-            raise ApiFailure("Format API inattendu : compatibilité de l'API à vérifier.", blocked=True) from exc
+            raise ApiFailure("Format API inattendu : compatibilité de l'API à vérifier.", blocked=True,
+                             kind="schema", http_status=response.status_code, duration_ms=elapsed) from exc
         return auctions, elapsed
 
     def close(self) -> None:
@@ -232,6 +292,12 @@ class Monitor:
             "last_poll_at": None, "last_success_at": None, "next_poll_at": None,
             "request_ms": None, "polls": 0, "seeded": False, "baseline_count": 0,
             "returned_count": 0,
+            "started_at": utc_now(), "successful_polls": 0, "failed_polls": 0,
+            "consecutive_failures": 0, "backoff_seconds": 0,
+            "last_error": None, "last_error_at": None, "last_error_kind": None,
+            "last_http_status": None, "last_attempt_ms": None,
+            "last_error_details": None,
+            "last_attempt_interval_seconds": None, "request_in_flight": False,
             "api_endpoint": API_URL,
             "coverage_warning": "Instantané global récent : cache, ordre et taille non vérifiés. Des annonces peuvent manquer entre deux mises à jour ; 1 s est la cadence de consultation, pas un délai garanti après publication.",
         }
@@ -290,7 +356,7 @@ class Monitor:
                 "SELECT lead_seconds FROM events WHERE weapon=? AND lead_seconds IS NOT NULL AND kind != 'baseline'",
                 (self.settings.weapon,))]
             return {
-                "mode": "demo" if self.demo else "live", "config": vars(self.settings),
+                "version": VERSION, "mode": "demo" if self.demo else "live", "config": vars(self.settings),
                 "status": dict(self.status), "offers": [dict(row) for row in rows],
                 "comparison": {"count": len(comparisons), "median_lead_seconds": statistics.median(comparisons) if comparisons else None,
                                "pending_count": len(self.pending_aleca)},
@@ -349,30 +415,51 @@ class Monitor:
 
     def run(self) -> None:
         failures = 0
+        previous_start: float | None = None
         while not self.stop_event.is_set():
             started = time.monotonic()
             with self.lock:
-                self.status.update(last_poll_at=utc_now(), polls=self.status["polls"] + 1, next_poll_at=None)
+                self.status.update(last_poll_at=utc_now(), polls=self.status["polls"] + 1, next_poll_at=None,
+                                   request_in_flight=True, backoff_seconds=0,
+                                   phase="polling" if self.status["seeded"] else "starting",
+                                   message="Requête API en cours…",
+                                   last_attempt_interval_seconds=round(started - previous_start, 3) if previous_start is not None else None)
+            previous_start = started
+            attempt_clock = time.perf_counter()
             try:
                 auctions, elapsed = self.client.search()
                 self.ingest(auctions, elapsed)
                 failures = 0
                 delay = max(0, self.settings.interval_seconds - (time.monotonic() - started))
                 with self.lock:
-                    self.status.update(phase="watching", message="Surveillance active. La couverture API reste à vérifier sur le service réel.")
+                    self.status.update(phase="watching", message="Réponse API valide reçue. La couverture et la fraîcheur du flux restent à vérifier.",
+                                       successful_polls=self.status["successful_polls"] + 1,
+                                       consecutive_failures=0, request_in_flight=False, last_attempt_ms=elapsed,
+                                       last_error=None, last_error_kind=None, last_error_details=None)
                     self.status.update(getattr(self.client, "last_response_meta", {}))
             except ApiFailure as exc:
                 failures += 1
+                delay = max(exc.retry_after or 0, min(120, 2 ** min(failures, 7)), self.settings.interval_seconds)
                 with self.lock:
-                    self.status.update(phase="blocked" if exc.blocked else "backoff", message=str(exc))
+                    self.status.update(phase="blocked" if exc.blocked else "backoff", message=str(exc),
+                                       failed_polls=self.status["failed_polls"] + 1,
+                                       consecutive_failures=failures, last_error=str(exc), last_error_at=utc_now(),
+                                       last_error_kind=exc.kind, last_http_status=exc.http_status,
+                                       last_error_details=safe_failure_details(exc),
+                                       last_attempt_ms=exc.duration_ms if exc.duration_ms is not None else round((time.perf_counter() - attempt_clock) * 1000, 2),
+                                       request_in_flight=False, backoff_seconds=0 if exc.blocked else delay)
+                print(json.dumps({"event": "api_failure", "at": self.status["last_error_at"],
+                                  "message": str(exc), "kind": exc.kind, "http_status": exc.http_status,
+                                  "failed_attempts": failures, "retry_in_seconds": None if exc.blocked else delay}, ensure_ascii=False), flush=True)
                 if exc.blocked:
                     self.stop_event.wait()
                     return
-                delay = max(exc.retry_after or 0, min(120, 2 ** min(failures, 7)), self.settings.interval_seconds)
             except Exception:
                 # A programming/storage failure is surfaced; do not spin or claim success.
                 with self.lock:
-                    self.status.update(phase="error", message="Erreur interne : surveillance arrêtée. Consulter le terminal.")
+                    self.status.update(phase="error", message="Erreur interne : surveillance arrêtée. Consulter le terminal.",
+                                       request_in_flight=False, failed_polls=self.status["failed_polls"] + 1,
+                                       last_error="Erreur interne : voir le terminal.", last_error_kind="internal", last_error_at=utc_now())
                 import traceback
                 traceback.print_exc()
                 return

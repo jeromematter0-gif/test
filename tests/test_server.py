@@ -73,6 +73,16 @@ class ServerTests(unittest.TestCase):
         self.assertTrue(headers["Content-Type"].startswith("text/csv"))
         self.assertTrue(body.startswith(b"\xef\xbb\xbfmode,event_id,"))
 
+    def test_diagnostic_export_includes_health_and_omits_seller_history(self):
+        self.monitor.ingest([listing()], 1)
+        status, headers, body = self.request("GET", "/api/diagnostic.json")
+        self.assertEqual(status, 200)
+        report = json.loads(body)
+        self.assertIn("version", report)
+        self.assertEqual(report["status"]["successful_polls"], 0)
+        self.assertNotIn("offers", report)
+        self.assertNotIn(b"Seller", body)
+
     def test_unknown_and_traversal_paths_are_not_served(self):
         for path in ["/missing", "/../core.py", "/static/../core.py"]:
             with self.subTest(path=path):

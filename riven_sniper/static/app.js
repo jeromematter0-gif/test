@@ -300,12 +300,13 @@
       seen.add(key);
     }
     initialized = true;
-    $('mode-badge').textContent = isDemo ? 'DÉMO SIMULÉE' : 'API EN DIRECT';
-    $('mode-badge').className = `mode-badge ${isDemo ? 'demo' : 'live'}`;
+    const apiConnected = status.seeded && !['blocked', 'error', 'backoff'].includes(status.phase);
+    $('mode-badge').textContent = isDemo ? 'DÉMO SIMULÉE' : apiConnected ? 'API CONNECTÉE' : 'API NON CONNECTÉE';
+    $('mode-badge').className = `mode-badge ${isDemo ? 'demo' : apiConnected ? 'live' : ''}`;
     $('demo-banner').hidden = !isDemo;
     const phase = status.phase || 'starting';
-    $('phase-label').textContent = { starting: 'Initialisation du radar', watching: isDemo ? 'Simulation en cours' : 'Surveillance active', backoff: 'Pause imposée par l’API', blocked: 'Accès à l’API bloqué', error: 'Surveillance interrompue' }[phase] || 'État de la surveillance';
-    $('status-dot').className = `status-dot ${phase === 'watching' ? 'active' : (phase === 'error' || phase === 'blocked') ? 'error' : 'warning'}`;
+    $('phase-label').textContent = { starting: 'Connexion à l’API', polling: 'Requête API en cours', watching: isDemo ? 'Simulation en cours' : 'Surveillance active', backoff: 'Collecte en échec · nouvelle tentative prévue', blocked: 'Accès à l’API bloqué', error: 'Surveillance interrompue' }[phase] || 'État de la surveillance';
+    $('status-dot').className = `status-dot ${phase === 'watching' || (phase === 'polling' && status.seeded) ? 'active' : (phase === 'error' || phase === 'blocked') ? 'error' : 'warning'}`;
     $('phase-message').textContent = status.message || 'En attente de nouvelles offres.';
     $('last-success').textContent = time(status.last_success_at);
     $('coverage-warning').textContent = status.coverage_warning || 'Instantané global récent : la couverture dépend du cache et de la taille du flux. Une consultation chaque seconde ne garantit pas une détection en une seconde.';
@@ -318,10 +319,23 @@
     $('max-price').textContent = integer.format(number(config.max_price) ?? 2000);
     $('aleca-offer-price').min = String(number(config.min_price) ?? 10);
     $('aleca-offer-price').max = String(number(config.max_price) ?? 2000);
-    $('interval').textContent = duration(config.interval_seconds);
+    const nextAttempt = date(status.next_poll_at);
+    const clockNow = date(next.clock) || new Date();
+    const secondsUntilRetry = nextAttempt ? Math.max(0, Math.ceil((nextAttempt - clockNow) / 1000)) : null;
+    const failedCollection = ['backoff', 'blocked', 'error'].includes(phase);
+    $('api-error-banner').hidden = !failedCollection;
+    if (failedCollection) {
+      $('api-error-banner').textContent = `${status.seeded ? 'La collecte ne reçoit plus de données.' : 'Surveillance non opérationnelle : aucune réponse API valide reçue.'} ${status.message || ''}${phase === 'backoff' && secondsUntilRetry !== null ? ` Prochaine tentative dans ${integer.format(secondsUntilRetry)} s.` : ' Collecte arrêtée.'}`;
+    }
+    $('interval').textContent = phase === 'backoff' ? 'En pause' : ['blocked', 'error'].includes(phase) ? 'Arrêtée' : !status.seeded ? 'Connexion…' : `${duration(config.interval_seconds)} cible`;
+    $('cadence-detail').textContent = phase === 'backoff'
+      ? `Nouvel essai ${secondsUntilRetry === null ? 'en attente' : `dans ${integer.format(secondsUntilRetry)} s`} · cible ${duration(config.interval_seconds)}`
+      : ['blocked', 'error'].includes(phase) ? 'aucune surveillance effective'
+      : `Cadence cible hors erreurs${number(status.last_attempt_interval_seconds) === null ? '' : ` · dernier intervalle ${duration(status.last_attempt_interval_seconds)}`}`;
     $('new-count').textContent = integer.format(offers.filter((offer) => offer.kind !== 'baseline').length);
-    $('request-duration').replaceChildren(document.createTextNode(number(status.request_ms) === null ? '—' : integer.format(status.request_ms)));
-    if (number(status.request_ms) !== null) $('request-duration').append(element('small', '', isDemo ? 'ms simulées' : 'ms'));
+    const attemptDuration = number(status.last_attempt_ms) ?? number(status.request_ms);
+    $('request-duration').replaceChildren(document.createTextNode(attemptDuration === null ? '—' : integer.format(attemptDuration)));
+    if (attemptDuration !== null) $('request-duration').append(element('small', '', isDemo ? 'ms simulées' : 'ms'));
     const lead = number(comparison.median_lead_seconds);
     $('median-lead').textContent = duration(lead, true);
     $('median-lead').className = `metric-value accent${lead !== null && lead < 0 ? ' negative' : ''}`;
@@ -331,13 +345,15 @@
     $('pending-comparisons').textContent = `${integer.format(pendingCount)} arrivée${pendingCount > 1 ? 's' : ''} en attente de rapprochement${isDemo ? ' · simulation' : ''}`;
     $('offer-count').textContent = integer.format(offers.length);
     $('poll-count').textContent = integer.format(number(status.polls) ?? 0);
-    $('returned-count').textContent = number(status.returned_count) === null ? '' : `· ${integer.format(status.returned_count)} annonces dans le dernier instantané`;
-    $('baseline-info').textContent = status.seeded ? `${integer.format(number(status.baseline_count) ?? 0)} offre(s) au démarrage · sans alerte` : 'État initial en attente';
+    $('success-count').textContent = integer.format(number(status.successful_polls) ?? 0);
+    $('failure-count').textContent = integer.format(number(status.failed_polls) ?? 0);
+    $('returned-count').textContent = !status.seeded || number(status.returned_count) === null ? '' : `· ${integer.format(status.returned_count)} annonces dans le dernier instantané`;
+    $('baseline-info').textContent = status.seeded ? `${integer.format(number(status.baseline_count) ?? 0)} offre(s) au démarrage · sans alerte` : 'Aucune donnée reçue de l’API';
     $('table-wrap').hidden = offers.length === 0;
     $('offers-empty').hidden = offers.length !== 0;
     if (!offers.length) {
-      $('offers-empty').querySelector('h3').textContent = status.seeded ? 'À l’affût de la prochaine offre' : 'Le radar se prépare';
-      $('empty-message').textContent = status.seeded ? 'Aucune offre dans la plage de prix. Gardez cette page ouverte pour recevoir les prochaines détections.' : 'Les premières offres apparaîtront après la connexion.';
+      $('offers-empty').querySelector('h3').textContent = failedCollection ? 'La collecte ne fonctionne pas' : status.seeded ? 'À l’affût de la prochaine offre' : 'Connexion à l’API en cours';
+      $('empty-message').textContent = failedCollection ? `${status.message || 'Consultez le diagnostic.'} Utilisez « Diagnostic » pour récupérer le détail de l’échec.` : status.seeded ? 'Aucune offre dans la plage de prix. Gardez cette page ouverte pour recevoir les prochaines détections.' : 'Aucune réponse valide pour le moment : la surveillance n’est pas encore opérationnelle.';
     }
     renderOffers(offers, newKeys);
     notifyOffers(newOffers, isDemo);

@@ -12,13 +12,14 @@
   <body>
     <div class="app-shell">
       <header class="topbar">
-        <a class="brand" href="/" aria-label="Riven Sniper, accueil"><span class="brand-mark" aria-hidden="true">⌖</span><span>RIVEN<span class="brand-light">SNIPER</span></span><span class="version">01</span></a>
+        <a class="brand" href="/" aria-label="Riven Sniper, accueil"><span class="brand-mark" aria-hidden="true">⌖</span><span>RIVEN<span class="brand-light">SNIPER</span></span><span class="version">02</span></a>
         <div class="header-meta"><span class="platform">PC <span aria-hidden="true">/</span> CROSS-SAVE</span><span id="mode-badge" class="mode-badge">CONNEXION</span></div>
       </header>
 
       <main>
         <div id="demo-banner" class="notice demo-notice" hidden><strong>Mode démonstration.</strong> Les offres et les délais sont simulés. Ce mode ne mesure pas les performances réelles de l’API ni celles d’AlecaFrame.</div>
         <div id="error-banner" class="notice error-notice" role="alert" hidden></div>
+        <div id="api-error-banner" class="notice error-notice" role="alert" hidden></div>
 
         <section class="intro" aria-labelledby="page-title">
           <div>
@@ -38,13 +39,13 @@
           <div class="weapon-visual" aria-hidden="true"><svg viewBox="0 0 112 72" fill="none"><path d="M17 27h43l18-7 17 5-2 10H63l-6 10-10 1-9-11H17z" stroke="currentColor" stroke-width="2"/><path d="M44 37l-5 20H28l5-23M62 28l22-3M72 35v6H59M20 24v15M87 20v15" stroke="currentColor" stroke-width="2"/><path d="M33 18h43M21 47h8" stroke="currentColor" opacity=".35"/></svg></div>
           <div class="watch-weapon"><span class="field-label">ARME CIBLÉE</span><h2 id="weapon-label">Dual Toxocyst</h2><span class="weapon-detail">Riven révélé · toutes statistiques · tous les rolls</span></div>
           <div class="watch-price"><span class="field-label">PRIX D’ACHAT IMMÉDIAT</span><div><span id="min-price">10</span><span class="price-separator">—</span><span id="max-price">2 000</span><span class="currency">pl</span></div></div>
-          <div class="watch-cadence"><span class="field-label">CADENCE DE CONSULTATION</span><div id="interval">—</div><span class="weapon-detail">délai de détection non garanti</span></div>
+          <div class="watch-cadence"><span class="field-label">ÉTAT DE LA COLLECTE</span><div id="interval">Connexion…</div><span class="weapon-detail" id="cadence-detail">cadence cible : 1 s si les requêtes réussissent</span></div>
         </section>
         <p id="coverage-warning" class="coverage-warning">Instantané global récent : la couverture dépend du cache et de la taille du flux. Une consultation chaque seconde ne garantit pas une détection en une seconde.</p>
 
         <section class="metrics" aria-label="Mesures de surveillance">
           <article class="metric"><span class="metric-label">OFFRES DÉTECTÉES</span><div class="metric-value" id="new-count">0</div><span class="metric-caption">hors état initial, dans le journal affiché</span></article>
-          <article class="metric"><span class="metric-label">DERNIÈRE REQUÊTE</span><div class="metric-value" id="request-duration">—</div><span class="metric-caption">aller-retour HTTP, hors attente</span></article>
+          <article class="metric"><span class="metric-label">DERNIÈRE TENTATIVE</span><div class="metric-value" id="request-duration">—</div><span class="metric-caption">durée de l’essai, même en cas d’échec</span></article>
           <article class="metric"><span class="metric-label">AVANCE DE DÉTECTION MÉDIANE (APPROX.)</span><div class="metric-value accent" id="median-lead">—</div><span class="metric-caption" id="comparison-count">aucune comparaison manuelle</span></article>
         </section>
 
@@ -60,7 +61,7 @@
         <section class="feed" aria-labelledby="feed-title">
           <div class="feed-toolbar">
             <div class="feed-title-wrap"><h2 id="feed-title">Le radar</h2><span class="count-badge" id="offer-count">0</span></div>
-            <div class="feed-actions"><button id="sound-button" class="control-button" type="button" aria-pressed="false"><span aria-hidden="true">♪</span> <span id="sound-label">Activer le son</span></button><button id="notification-button" class="control-button" type="button"><span aria-hidden="true">◉</span> <span id="notification-label">Notifications</span></button><a class="export-link" href="/api/export.csv" download>Exporter CSV <span aria-hidden="true">↗</span></a></div>
+            <div class="feed-actions"><button id="sound-button" class="control-button" type="button" aria-pressed="false"><span aria-hidden="true">♪</span> <span id="sound-label">Activer le son</span></button><button id="notification-button" class="control-button" type="button"><span aria-hidden="true">◉</span> <span id="notification-label">Notifications</span></button><a class="export-link" href="/api/diagnostic.json" download="diagnostic-riven-sniper.json">Diagnostic <span aria-hidden="true">↗</span></a><a class="export-link" href="/api/export.csv" download>Exporter CSV <span aria-hidden="true">↗</span></a></div>
           </div>
           <p id="alert-message" class="alert-message" aria-live="polite">Le son et les notifications sont désactivés. Les offres présentes au démarrage ne déclenchent pas d’alerte.</p>
           <div id="offers-empty" class="empty-state"><div class="radar-symbol" aria-hidden="true"><span></span></div><h3>Le radar se prépare</h3><p id="empty-message">Les premières offres apparaîtront après la connexion.</p></div>
@@ -70,7 +71,7 @@
               <tbody id="offers-body"></tbody>
             </table>
           </div>
-          <div class="feed-footer"><span><span class="footer-dot" aria-hidden="true"></span> <span id="poll-count">0</span> requêtes effectuées <span id="returned-count"></span></span><span id="baseline-info">État initial en attente</span></div>
+          <div class="feed-footer"><span><span class="footer-dot" aria-hidden="true"></span> <span id="poll-count">0</span> tentatives · <span id="success-count">0</span> réussies · <span id="failure-count">0</span> échouées <span id="returned-count"></span></span><span id="baseline-info">Aucune donnée reçue</span></div>
         </section>
 
         <aside class="method-note" aria-label="Comprendre les mesures"><span class="note-icon" aria-hidden="true">i</span><div><strong>Une comparaison manuelle, avec ses limites.</strong><p>Quand l’alerte AlecaFrame arrive, cliquez sur « Aleca reçue » sur l’offre correspondante. L’avance de détection approximative compare ce clic à la détection par le serveur, pas à l’arrivée de la notification Sniper. Une valeur positive signifie que le serveur a détecté l’offre avant votre clic. Le résultat inclut le rafraîchissement de la page (cible : 0,5 s), le transport et votre temps de réaction. Aucune intégration automatique avec AlecaFrame. L’âge API correspond à la date de création déclarée par le site, pas à la latence réelle de publication. Aucune prise de contact ni aucun achat automatique.</p></div></aside>
