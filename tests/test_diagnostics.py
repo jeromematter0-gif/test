@@ -67,8 +67,8 @@ class FailureReportingTests(unittest.TestCase):
             error.__cause__ = socket.gaierror(-2, "private network name")
             raise error
 
-        client = MarketClient(Settings(), transport=httpx.MockTransport(handler))
-        report = connection_report(Settings(), client=client)
+        client = MarketClient(Settings.single(), transport=httpx.MockTransport(handler))
+        report = connection_report(Settings.single(), client=client)
         self.assertFalse(report["ok"])
         self.assertEqual(report["error_kind"], "dns")
         self.assertEqual(report["details"]["network_codes"], [-2])
@@ -78,9 +78,9 @@ class FailureReportingTests(unittest.TestCase):
         self.assertNotIn("private network name", json.dumps(report))
 
     def test_report_distinguishes_valid_empty_snapshot_from_connection_failure(self):
-        client = MarketClient(Settings(), transport=httpx.MockTransport(
+        client = MarketClient(Settings.single(), transport=httpx.MockTransport(
             lambda request: httpx.Response(200, json={"payload": {"auctions": []}})))
-        report = connection_report(Settings(), client=client)
+        report = connection_report(Settings.single(), client=client)
         self.assertTrue(report["ok"])
         self.assertEqual(report["returned_count"], 0)
         self.assertNotIn("error_kind", report)
@@ -118,7 +118,7 @@ class FailureReportingTests(unittest.TestCase):
             def set(self):
                 pass
 
-        monitor = Monitor(Settings(), ":memory:", client=Client())
+        monitor = Monitor(Settings.single(), ":memory:", client=Client())
         self.addCleanup(monitor.close)
         monitor.stop_event = SimulatedWait()
         with contextlib.redirect_stdout(io.StringIO()):
@@ -161,7 +161,7 @@ class FailureReportingTests(unittest.TestCase):
             def set(self):
                 pass
 
-        monitor = Monitor(Settings(), ":memory:", client=Client())
+        monitor = Monitor(Settings.single(), ":memory:", client=Client())
         self.addCleanup(monitor.close)
         monitor.stop_event = SimulatedWait()
         with contextlib.redirect_stdout(io.StringIO()):

@@ -5,14 +5,14 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <meta name="color-scheme" content="dark">
     <meta name="theme-color" content="#111319">
-    <title>Riven Sniper · Dual Toxocyst</title>
+    <title>Riven Sniper · Cinq armes & Discord</title>
     <link rel="stylesheet" href="/styles.css">
     <script src="/app.js" defer></script>
   </head>
   <body>
     <div class="app-shell">
       <header class="topbar">
-        <a class="brand" href="/" aria-label="Riven Sniper, accueil"><span class="brand-mark" aria-hidden="true">⌖</span><span>RIVEN<span class="brand-light">SNIPER</span></span><span class="version">02</span></a>
+        <a class="brand" href="/" aria-label="Riven Sniper, accueil"><span class="brand-mark" aria-hidden="true">⌖</span><span>RIVEN<span class="brand-light">SNIPER</span></span><span class="version">03</span></a>
         <div class="header-meta"><span class="platform">PC <span aria-hidden="true">/</span> CROSS-SAVE</span><span id="mode-badge" class="mode-badge">CONNEXION</span></div>
       </header>
 
@@ -25,7 +25,7 @@
           <div>
             <div class="eyebrow"><span class="tiny-cross" aria-hidden="true">+</span> SURVEILLANCE RIVEN</div>
             <h1 id="page-title">Vos offres ciblées.<br><span>Leur arrivée, mesurée.</span></h1>
-            <p class="intro-copy">Un seul objectif : repérer les Dual Toxocyst à votre prix et comparer l’arrivée de vos alertes.</p>
+            <p class="intro-copy">Vos cinq armes, une seule collecte. Les offres à votre prix, directement dans votre salon Discord.</p>
           </div>
           <div class="monitor-status" aria-live="polite">
             <div class="status-line"><span id="status-dot" class="status-dot"></span><span id="phase-label">Connexion en cours</span></div>
@@ -35,13 +35,26 @@
           </div>
         </section>
 
-        <section class="watch-config" aria-label="Recherche surveillée">
-          <div class="weapon-visual" aria-hidden="true"><svg viewBox="0 0 112 72" fill="none"><path d="M17 27h43l18-7 17 5-2 10H63l-6 10-10 1-9-11H17z" stroke="currentColor" stroke-width="2"/><path d="M44 37l-5 20H28l5-23M62 28l22-3M72 35v6H59M20 24v15M87 20v15" stroke="currentColor" stroke-width="2"/><path d="M33 18h43M21 47h8" stroke="currentColor" opacity=".35"/></svg></div>
-          <div class="watch-weapon"><span class="field-label">ARME CIBLÉE</span><h2 id="weapon-label">Dual Toxocyst</h2><span class="weapon-detail">Riven révélé · toutes statistiques · tous les rolls</span></div>
-          <div class="watch-price"><span class="field-label">PRIX D’ACHAT IMMÉDIAT</span><div><span id="min-price">10</span><span class="price-separator">—</span><span id="max-price">2 000</span><span class="currency">pl</span></div></div>
+        <section class="watch-config multi-watch" aria-label="Recherches surveillées">
+          <div class="watch-overview"><span class="field-label">VOS RECHERCHES · PRIX IMMÉDIATS INCLUS</span><h2 id="watch-count">5 armes surveillées</h2><span class="weapon-detail">Toutes statistiques · tous les rolls · vendeurs en ligne ou hors ligne</span></div>
           <div class="watch-cadence"><span class="field-label">ÉTAT DE LA COLLECTE</span><div id="interval">Connexion…</div><span class="weapon-detail" id="cadence-detail">cadence cible : 1 s si les requêtes réussissent</span></div>
+          <div id="watch-list" class="watch-list"></div>
         </section>
         <p id="coverage-warning" class="coverage-warning">Instantané global récent : la couverture dépend du cache et de la taille du flux. Une consultation chaque seconde ne garantit pas une détection en une seconde.</p>
+
+        <details id="discord-settings" class="discord-panel" open>
+          <summary><span>Alertes Discord</span><span id="discord-summary">Webhook à configurer</span></summary>
+          <div class="discord-content">
+            <p id="discord-state" class="discord-state" role="status">En attente de la configuration locale.</p>
+            <form id="discord-form" class="discord-form">
+              <label for="discord-webhook">Adresse du webhook de votre salon<input id="discord-webhook" type="password" autocomplete="off" spellcheck="false" placeholder="https://discord.com/api/webhooks/…"></label>
+              <label class="discord-toggle" for="discord-enabled"><input id="discord-enabled" type="checkbox"> Envoyer les nouvelles offres sur Discord</label>
+              <div class="discord-actions"><button class="compare-button" id="discord-save" type="submit">Enregistrer localement</button><button class="control-button" id="discord-test" type="button">Envoyer un message de test</button><button class="control-button" id="discord-clear" type="button">Effacer le webhook</button></div>
+            </form>
+            <p id="discord-form-message" class="discord-form-message" role="status"></p>
+            <p class="discord-help">L’adresse reste dans un fichier local exclu de Git et n’est jamais réaffichée. Laissez le champ vide pour conserver le webhook enregistré. Seules les prochaines détections sont envoyées ; le premier état reste silencieux. Vous pourrez fermer cet onglet et garder la fenêtre du programme ouverte.</p>
+          </div>
+        </details>
 
         <section class="metrics" aria-label="Mesures de surveillance">
           <article class="metric"><span class="metric-label">OFFRES DÉTECTÉES</span><div class="metric-value" id="new-count">0</div><span class="metric-caption">hors état initial, dans le journal affiché</span></article>
@@ -60,7 +73,7 @@
 
         <section class="feed" aria-labelledby="feed-title">
           <div class="feed-toolbar">
-            <div class="feed-title-wrap"><h2 id="feed-title">Le radar</h2><span class="count-badge" id="offer-count">0</span></div>
+            <div class="feed-title-wrap"><h2 id="feed-title">Le radar</h2><span class="count-badge" id="offer-count">0</span><label class="filter-label" for="weapon-filter"><span class="visually-hidden">Filtrer l’arme affichée</span><select id="weapon-filter"><option value="">Toutes les armes</option></select></label></div>
             <div class="feed-actions"><button id="sound-button" class="control-button" type="button" aria-pressed="false"><span aria-hidden="true">♪</span> <span id="sound-label">Activer le son</span></button><button id="notification-button" class="control-button" type="button"><span aria-hidden="true">◉</span> <span id="notification-label">Notifications</span></button><a class="export-link" href="/api/diagnostic.json" download="diagnostic-riven-sniper.json">Diagnostic <span aria-hidden="true">↗</span></a><a class="export-link" href="/api/export.csv" download>Exporter CSV <span aria-hidden="true">↗</span></a></div>
           </div>
           <p id="alert-message" class="alert-message" aria-live="polite">Le son et les notifications sont désactivés. Les offres présentes au démarrage ne déclenchent pas d’alerte.</p>

@@ -16,6 +16,49 @@
   let notificationsEnabled = false;
   let audioContext = null;
   let lastFeedSignature = '';
+  let watchSignature = '';
+  let activeWeapon = '';
+  let discordBusy = false;
+  let lastDiscordSignature = '';
+
+  $('weapon-filter').addEventListener('change', () => {
+    activeWeapon = $('weapon-filter').value;
+    lastFeedSignature = '';
+    if (state) render(state);
+  });
+
+  async function discordAction(path, body) {
+    if (discordBusy) return;
+    discordBusy = true;
+    $('discord-save').disabled = true;
+    $('discord-test').disabled = true;
+    $('discord-clear').disabled = true;
+    $('discord-form-message').textContent = 'Enregistrement…';
+    try {
+      const response = await fetch(path, { method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body), signal: AbortSignal.timeout(10000) });
+      const next = await response.json();
+      if (!response.ok) throw new Error(next.error || `HTTP ${response.status}`);
+      $('discord-webhook').value = '';
+      lastDiscordSignature = '';
+      render(next);
+      $('discord-form-message').textContent = path.endsWith('/test') ? 'Message de test mis en file. Vérifiez votre salon et l’état de l’envoi ci-dessus.' : 'Réglages enregistrés sur ce PC.';
+    } catch (error) {
+      $('discord-form-message').textContent = `Impossible : ${error.name === 'TimeoutError' ? 'délai dépassé' : error.message}`;
+    } finally {
+      discordBusy = false;
+      $('discord-save').disabled = false;
+      $('discord-test').disabled = !state?.discord?.enabled;
+      $('discord-clear').disabled = !state?.discord?.configured;
+    }
+  }
+
+  $('discord-form').addEventListener('submit', (event) => {
+    event.preventDefault();
+    void discordAction('/api/discord/config', { webhook_url: $('discord-webhook').value, enabled: $('discord-enabled').checked });
+  });
+  $('discord-test').addEventListener('click', () => { void discordAction('/api/discord/test', {}); });
+  $('discord-clear').addEventListener('click', () => { void discordAction('/api/discord/config', { clear: true }); });
 
   function element(tag, className, text) {
     const node = document.createElement(tag);
@@ -96,7 +139,7 @@
     if (soundEnabled) playSound();
     if (!notificationsEnabled || !('Notification' in window) || Notification.permission !== 'granted') return;
     const offer = offers[0];
-    const title = `${isDemo ? '[DÉMO] ' : ''}${offers.length > 1 ? `${offers.length} offres détectées` : 'Dual Toxocyst détecté'}`;
+    const title = `${isDemo ? '[DÉMO] ' : ''}${offers.length > 1 ? `${offers.length} offres détectées` : `${offer.weapon_label || 'Riven'} détecté`}`;
     try {
       const notification = new Notification(title, {
         body: `${integer.format(number(offer.price) ?? 0)} pl · ${offer.seller || 'Vendeur inconnu'}${offers.length > 1 ? ` · et ${offers.length - 1} autre(s)` : ''}`,
@@ -208,8 +251,8 @@
   function buildRow(offer, fresh) {
     const row = element('tr', fresh ? 'fresh' : '');
     const offerCell = element('td');
-    const title = element('span', 'offer-title', offer.name || 'Dual Toxocyst');
-    title.title = String(offer.name || 'Dual Toxocyst');
+    const title = element('span', 'offer-title', offer.full_name || offer.name || 'Riven');
+    title.title = String(offer.full_name || offer.name || 'Riven');
     offerCell.append(title);
     const seller = element('span', 'seller-line');
     const sellerStatus = ['online', 'ingame', 'invisible'].includes(offer.seller_status) ? offer.seller_status : 'offline';
@@ -264,6 +307,21 @@
       link.title = 'Ouvrir sur warframe.market';
       linkCell.append(link);
     }
+    if (offer.trading_message) {
+      const copy = element('button', 'copy-button', 'Copier /w');
+      copy.type = 'button';
+      copy.title = offer.trading_message;
+      copy.setAttribute('aria-label', `Copier le message pour ${offer.seller}`);
+      copy.addEventListener('click', async () => {
+        try {
+          await navigator.clipboard.writeText(offer.trading_message);
+          copy.textContent = 'Copié !';
+        } catch (_) {
+          showError(`Copie automatique indisponible. Message à sélectionner : ${offer.trading_message}`);
+        }
+      });
+      linkCell.append(copy);
+    }
     row.append(offerCell, priceCell, detectedCell, compareCell, linkCell);
     return row;
   }
@@ -288,6 +346,7 @@
     if (!next || typeof next !== 'object' || !Array.isArray(next.offers)) throw new Error('Réponse du serveur invalide.');
     state = next;
     const config = next.config || {};
+    const watches = Array.isArray(config.watches) ? config.watches : [];
     const status = next.status || {};
     const comparison = next.comparison || {};
     const isDemo = next.mode === 'demo';
@@ -314,11 +373,38 @@
     const cacheControl = typeof status.api_cache_control === 'string' ? status.api_cache_control : '';
     $('cache-info').hidden = cacheAge === null && !cacheControl;
     $('cache-info').textContent = `${cacheAge === null ? '' : `Âge du cache API : ${duration(cacheAge)}`}${cacheAge !== null && cacheControl ? ' · ' : ''}${cacheControl}`;
-    $('weapon-label').textContent = config.label || 'Dual Toxocyst';
-    $('min-price').textContent = integer.format(number(config.min_price) ?? 10);
-    $('max-price').textContent = integer.format(number(config.max_price) ?? 2000);
-    $('aleca-offer-price').min = String(number(config.min_price) ?? 10);
-    $('aleca-offer-price').max = String(number(config.max_price) ?? 2000);
+    const nextWatchSignature = JSON.stringify(watches);
+    if (nextWatchSignature !== watchSignature) {
+      watchSignature = nextWatchSignature;
+      $('watch-count').textContent = `${watches.length} arme${watches.length > 1 ? 's' : ''} surveillée${watches.length > 1 ? 's' : ''}`;
+      const cards = document.createDocumentFragment();
+      const options = document.createDocumentFragment();
+      const all = element('option', '', 'Toutes les armes'); all.value = ''; options.append(all);
+      for (const watch of watches) {
+        const card = element('div', 'watch-card');
+        card.append(element('strong', '', watch.label), element('span', '', `${integer.format(watch.min_price)}–${integer.format(watch.max_price)} pl`));
+        cards.append(card);
+        const option = element('option', '', watch.label); option.value = watch.weapon; options.append(option);
+      }
+      $('watch-list').replaceChildren(cards);
+      $('weapon-filter').replaceChildren(options);
+      if (!watches.some((watch) => watch.weapon === activeWeapon)) activeWeapon = '';
+      $('weapon-filter').value = activeWeapon;
+    }
+    $('aleca-offer-price').min = String(watches.length ? Math.min(...watches.map((watch) => watch.min_price)) : 10);
+    $('aleca-offer-price').max = String(watches.length ? Math.max(...watches.map((watch) => watch.max_price)) : 501);
+    const discord = next.discord || {};
+    const discordSignature = JSON.stringify({ configured: discord.configured, enabled: discord.enabled });
+    if (discordSignature !== lastDiscordSignature && !discordBusy) {
+      $('discord-enabled').checked = !!discord.enabled;
+      lastDiscordSignature = discordSignature;
+    }
+    if (!discordBusy) {
+      $('discord-test').disabled = !discord.enabled;
+      $('discord-clear').disabled = !discord.configured;
+    }
+    $('discord-summary').textContent = !discord.configured ? 'Webhook à configurer' : !discord.enabled ? 'Désactivé' : discord.phase === 'error' ? 'Erreur d’envoi' : discord.phase === 'backoff' ? 'En attente de réessai' : 'Activé';
+    $('discord-state').textContent = `${discord.message || discord.last_error || 'Configurer votre salon.'} · ${integer.format(discord.sent_count || 0)} envoyé(s) · ${integer.format(discord.pending_count || 0)} en attente · ${integer.format(discord.failed_count || 0)} échec(s)${discord.expired_count ? ` · ${integer.format(discord.expired_count)} expiré(s)` : ''}${discord.last_error ? ` · ${discord.last_error}` : ''}`;
     const nextAttempt = date(status.next_poll_at);
     const clockNow = date(next.clock) || new Date();
     const secondsUntilRetry = nextAttempt ? Math.max(0, Math.ceil((nextAttempt - clockNow) / 1000)) : null;
@@ -343,19 +429,20 @@
     $('comparison-count').textContent = count ? `${integer.format(count)} comparaison${count > 1 ? 's' : ''} manuelle${count > 1 ? 's' : ''}${isDemo ? ' · simulation' : ''}` : 'aucune comparaison manuelle';
     const pendingCount = number(comparison.pending_count) ?? 0;
     $('pending-comparisons').textContent = `${integer.format(pendingCount)} arrivée${pendingCount > 1 ? 's' : ''} en attente de rapprochement${isDemo ? ' · simulation' : ''}`;
-    $('offer-count').textContent = integer.format(offers.length);
+    const displayedOffers = activeWeapon ? offers.filter((offer) => offer.weapon === activeWeapon) : offers;
+    $('offer-count').textContent = integer.format(displayedOffers.length);
     $('poll-count').textContent = integer.format(number(status.polls) ?? 0);
     $('success-count').textContent = integer.format(number(status.successful_polls) ?? 0);
     $('failure-count').textContent = integer.format(number(status.failed_polls) ?? 0);
     $('returned-count').textContent = !status.seeded || number(status.returned_count) === null ? '' : `· ${integer.format(status.returned_count)} annonces dans le dernier instantané`;
     $('baseline-info').textContent = status.seeded ? `${integer.format(number(status.baseline_count) ?? 0)} offre(s) au démarrage · sans alerte` : 'Aucune donnée reçue de l’API';
-    $('table-wrap').hidden = offers.length === 0;
-    $('offers-empty').hidden = offers.length !== 0;
-    if (!offers.length) {
+    $('table-wrap').hidden = displayedOffers.length === 0;
+    $('offers-empty').hidden = displayedOffers.length !== 0;
+    if (!displayedOffers.length) {
       $('offers-empty').querySelector('h3').textContent = failedCollection ? 'La collecte ne fonctionne pas' : status.seeded ? 'À l’affût de la prochaine offre' : 'Connexion à l’API en cours';
       $('empty-message').textContent = failedCollection ? `${status.message || 'Consultez le diagnostic.'} Utilisez « Diagnostic » pour récupérer le détail de l’échec.` : status.seeded ? 'Aucune offre dans la plage de prix. Gardez cette page ouverte pour recevoir les prochaines détections.' : 'Aucune réponse valide pour le moment : la surveillance n’est pas encore opérationnelle.';
     }
-    renderOffers(offers, newKeys);
+    renderOffers(displayedOffers, newKeys);
     notifyOffers(newOffers, isDemo);
   }
 

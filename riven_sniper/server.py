@@ -43,7 +43,7 @@ def create_server(monitor: Monitor, port: int = 8765) -> ThreadingHTTPServer:
                 self.json_reply(200, monitor.state())
             elif path == "/api/diagnostic.json":
                 state = monitor.state()
-                self.json_reply(200, {key: state[key] for key in ("version", "mode", "config", "status", "clock")})
+                self.json_reply(200, {key: state[key] for key in ("version", "mode", "config", "status", "discord", "clock")})
             elif path == "/api/export.csv":
                 self.reply(200, ("\ufeff" + monitor.export_csv()).encode(), "text/csv; charset=utf-8")
             elif path in ("/", "/app.js", "/styles.css"):
@@ -58,7 +58,7 @@ def create_server(monitor: Monitor, port: int = 8765) -> ThreadingHTTPServer:
             if not self.valid_host() or (origin is not None and origin not in origins):
                 self.json_reply(403, {"error": "Origine non autorisée."})
                 return
-            if self.path not in {"/api/compare", "/api/aleca"}:
+            if self.path not in {"/api/compare", "/api/aleca", "/api/discord/config", "/api/discord/test"}:
                 self.json_reply(404, {"error": "Introuvable."})
                 return
             try:
@@ -66,11 +66,18 @@ def create_server(monitor: Monitor, port: int = 8765) -> ThreadingHTTPServer:
                 if length < 1 or length > 4096 or self.headers.get("Content-Type", "").split(";")[0] != "application/json":
                     raise ValueError("Corps JSON invalide.")
                 data = json.loads(self.rfile.read(length))
-                if not isinstance(data, dict) or not isinstance(data.get("id"), str):
-                    raise ValueError("Identifiant requis.")
-                if data.get("received_at") is not None and not isinstance(data["received_at"], str):
-                    raise ValueError("Horodatage invalide.")
-                if self.path == "/api/aleca":
+                if not isinstance(data, dict):
+                    raise ValueError("Objet JSON requis.")
+                if self.path in {"/api/aleca", "/api/compare"}:
+                    if not isinstance(data.get("id"), str):
+                        raise ValueError("Identifiant requis.")
+                    if data.get("received_at") is not None and not isinstance(data["received_at"], str):
+                        raise ValueError("Horodatage invalide.")
+                if self.path == "/api/discord/config":
+                    monitor.discord.configure(data)
+                elif self.path == "/api/discord/test":
+                    monitor.discord.test_message()
+                elif self.path == "/api/aleca":
                     monitor.record_aleca(data["id"], data.get("price"), data.get("received_at"))
                 else:
                     monitor.compare(data["id"], data.get("received_at"), data.get("event_id"))

@@ -26,7 +26,7 @@ def listing():
 
 class ServerTests(unittest.TestCase):
     def setUp(self):
-        self.monitor = Monitor(Settings(), ":memory:", client=StubClient())
+        self.monitor = Monitor(Settings.single(), ":memory:", client=StubClient())
         self.server = create_server(self.monitor, port=0)
         self.thread = threading.Thread(target=self.server.serve_forever,
                                        kwargs={"poll_interval": 0.01}, daemon=True)
@@ -65,7 +65,7 @@ class ServerTests(unittest.TestCase):
                 self.assertIn("frame-ancestors 'none'", headers["Content-Security-Policy"])
                 self.assertGreater(len(body), 0)
         state = json.loads(self.request("GET", "/api/state")[2])
-        self.assertEqual(state["config"]["weapon"], "dual_toxocyst")
+        self.assertEqual(state["config"]["watches"][0]["weapon"], "dual_toxocyst")
 
     def test_csv_export_has_utf8_bom_and_csv_content(self):
         status, headers, body = self.request("GET", "/api/export.csv")
@@ -94,12 +94,30 @@ class ServerTests(unittest.TestCase):
                 self.assertEqual(self.request(method, path, headers={"Host": "attacker.invalid"})[0], 403)
 
     def test_foreign_origin_cannot_mutate_a_comparison(self):
-        for endpoint in ["/api/compare", "/api/aleca"]:
+        for endpoint in ["/api/compare", "/api/aleca", "/api/discord/config", "/api/discord/test"]:
             with self.subTest(endpoint=endpoint):
                 status, _, body = self.request("POST", endpoint, data={"id": "server-listing", "price": 100},
                                                headers={"Origin": "https://attacker.invalid"})
                 self.assertEqual(status, 403)
                 self.assertIn("error", json.loads(body))
+
+    def test_discord_configuration_and_test_are_local_and_never_echo_the_secret(self):
+        hook = "https://discord.com/api/webhooks/1/this_is_a_fake_test_token_12345"
+        code, _, body = self.request("POST", "/api/discord/config", data={"webhook_url": hook, "enabled": True})
+        self.assertEqual(code, 200)
+        self.assertTrue(json.loads(body)["discord"]["configured"])
+        self.assertNotIn(hook.encode(), body)
+        self.assertEqual(self.request("POST", "/api/discord/test", data={})[0], 200)
+        self.assertEqual(self.monitor.state()["discord"]["pending_count"], 1)
+        self.assertNotIn(hook.encode(), self.request("GET", "/api/diagnostic.json")[2])
+        self.assertEqual(self.request("POST", "/api/discord/config", data={"clear": True})[0], 200)
+        self.assertFalse(self.monitor.state()["discord"]["configured"])
+
+    def test_discord_invalid_destination_is_rejected_without_echoing_it(self):
+        code, _, body = self.request("POST", "/api/discord/config", data={"webhook_url": "https://secret.invalid/private", "enabled": True})
+        self.assertEqual(code, 400)
+        self.assertNotIn(b"secret.invalid", body)
+        self.assertEqual(self.request("POST", "/api/discord/test", data={})[0], 400)
 
     def test_post_validation_rejects_bad_bodies_and_content_types(self):
         cases = [

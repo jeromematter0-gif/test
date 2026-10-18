@@ -25,7 +25,7 @@ import httpx
 import certifi
 
 API_URL = "https://api.warframe.market/v1/auctions"
-VERSION = "0.2.0"
+VERSION = "0.3.0"
 
 
 def utc_now() -> str:
@@ -55,19 +55,53 @@ def auction_id_from_input(value: str) -> str:
 
 
 @dataclass(frozen=True)
-class Settings:
-    weapon: str = "dual_toxocyst"
-    label: str = "Dual Toxocyst"
+class Watch:
+    weapon: str
+    label: str
     min_price: int = 10
-    max_price: int = 2000
+    max_price: int = 201
+
+    def __post_init__(self) -> None:
+        if not re.fullmatch(r"[a-z0-9_]+", self.weapon) or not self.label:
+            raise ValueError("Arme invalide.")
+        if any(isinstance(p, bool) or not isinstance(p, int) for p in (self.min_price, self.max_price)) or self.min_price < 0 or self.max_price < self.min_price:
+            raise ValueError("La fourchette de prix est invalide.")
+
+
+DEFAULT_WATCHES = (
+    Watch("burston", "Burston", 10, 401),
+    Watch("dual_toxocyst", "Dual Toxocyst", 10, 201),
+    Watch("torid", "Torid", 10, 370),
+    Watch("verglas", "Verglas", 10, 350),
+    Watch("magistar", "Magistar", 10, 501),
+)
+
+
+@dataclass(frozen=True)
+class Settings:
+    watches: tuple[Watch, ...] = DEFAULT_WATCHES
     interval_seconds: float = 1.0
     platform: str = "pc"
 
     def __post_init__(self) -> None:
         if not math.isfinite(self.interval_seconds) or self.interval_seconds < 1:
             raise ValueError("La cadence minimale est de 1 seconde, partagée par ce processus.")
-        if self.min_price < 0 or self.max_price < self.min_price:
-            raise ValueError("La fourchette de prix est invalide.")
+        if not self.watches or len({w.weapon for w in self.watches}) != len(self.watches):
+            raise ValueError("Définir au moins une recherche, sans arme en double.")
+
+    def watch_for(self, weapon: str) -> Watch | None:
+        return next((w for w in self.watches if w.weapon == weapon), None)
+
+    def public(self) -> dict[str, Any]:
+        return {"watches": [vars(w) for w in self.watches], "interval_seconds": self.interval_seconds, "platform": self.platform}
+
+    @classmethod
+    def single(cls, *, weapon: str = "dual_toxocyst", min_price: int = 10, max_price: int = 2000,
+               interval_seconds: float = 1.0) -> Settings:
+        label = next((w.label for w in DEFAULT_WATCHES if w.weapon == weapon), None)
+        if label is None:
+            raise ValueError("Arme non prise en charge.")
+        return cls(watches=(Watch(weapon, label, min_price, max_price),), interval_seconds=interval_seconds)
 
 
 class ApiFailure(Exception):
@@ -217,13 +251,17 @@ class DemoClient:
         count = min(25, 1 + int((time.monotonic() - self.started) // 6))
         auctions = []
         for i in range(count):
+            watch = self.settings.watches[i % len(self.settings.watches)]
+            price = min(watch.max_price, 100 + (i % 5) * 15)
             auctions.append({
                 "id": f"demo-{i:04d}", "created": self.created,
-                "starting_price": 100 + i * 35, "buyout_price": 100 + i * 35,
+                "starting_price": price, "buyout_price": price,
                 "visible": True, "closed": False,
                 "owner": {"ingame_name": f"Simulation_{i + 1}", "status": "ingame", "platform": "pc"},
-                "item": {"type": "riven", "weapon_url_name": self.settings.weapon,
-                         "name": "Riven simulé"},
+                "item": {"type": "riven", "weapon_url_name": watch.weapon,
+                         "name": "Crita-visitis", "re_rolls": i * 7, "mastery_level": 10,
+                         "attributes": [{"url_name": "critical_chance", "value": 123.4, "positive": True},
+                                        {"url_name": "damage", "value": 85.2, "positive": True}]},
             })
         return list(reversed(auctions)), 0.0
 
@@ -238,14 +276,15 @@ def normalize(raw: dict[str, Any], settings: Settings, *, demo: bool = False) ->
     auction_id = raw.get("id")
     if not isinstance(auction_id, str) or not auction_id or not all(c.isalnum() or c in "-_" for c in auction_id):
         return None
-    if item.get("type") != "riven" or item.get("weapon_url_name") != settings.weapon:
+    watch = settings.watch_for(item.get("weapon_url_name"))
+    if item.get("type") != "riven" or watch is None:
         return None
     if owner.get("platform") not in (None, "pc"):
         return None
     price = raw.get("buyout_price")
     valid_price = isinstance(price, int) and not isinstance(price, bool) and price >= 0
     active = raw.get("closed") is not True and raw.get("visible") is not False and raw.get("private") is not True
-    eligible = active and valid_price and settings.min_price <= price <= settings.max_price
+    eligible = active and valid_price and watch.min_price <= price <= watch.max_price
     created = raw.get("created")
     if not isinstance(created, str):
         created = None
@@ -254,19 +293,35 @@ def normalize(raw: dict[str, Any], settings: Settings, *, demo: bool = False) ->
             parse_time(created)
         except ValueError:
             created = None
+    name = " ".join(str(item.get("name") or "Riven").split())[:200]
+    full_name = name if name.casefold().startswith(watch.label.casefold()) else f"{watch.label} {name[:1].upper()}{name[1:]}"
+    seller = str(owner.get("ingame_name") or "Vendeur inconnu")[:100]
+    trading_message = (f"/w {seller} Hi, I am interested in buying your {full_name} riven for {price} platinum, listed on Warframe.Market."
+                       if valid_price and re.fullmatch(r"[A-Za-z0-9_.#-]{1,100}", seller) else None)
+    attributes = []
+    for attr in item.get("attributes", []) if isinstance(item.get("attributes"), list) else []:
+        if isinstance(attr, dict) and isinstance(attr.get("value"), (int, float)) and not isinstance(attr["value"], bool) and math.isfinite(attr["value"]):
+            attributes.append({"name": str(attr.get("url_name") or "Attribut")[:100].replace("_", " "),
+                               "value": attr["value"], "positive": attr.get("positive") is not False})
+    def integer_detail(key: str) -> int | None:
+        value = item.get(key)
+        return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else None
     return {
-        "id": auction_id, "weapon": settings.weapon,
-        "name": str(item.get("name") or settings.label),
+        "id": auction_id, "weapon": watch.weapon, "weapon_label": watch.label,
+        "name": name, "full_name": full_name,
         "price": price if valid_price else None,
-        "seller": str(owner.get("ingame_name") or "Vendeur inconnu"),
+        "seller": seller,
         "seller_status": str(owner.get("status") or "unknown"),
         "created_at": created, "eligible": eligible,
         "url": None if demo else f"https://warframe.market/auction/{auction_id}",
+        "trading_message": trading_message,
+        "attributes": attributes[:8], "rerolls": integer_detail("re_rolls"), "mastery_level": integer_detail("mastery_level"),
     }
 
 
 class Monitor:
-    def __init__(self, settings: Settings, database: Path | str, *, demo: bool = False, client: Any = None):
+    def __init__(self, settings: Settings, database: Path | str, *, demo: bool = False, client: Any = None,
+                 discord_config_path: Path | None = None, discord_transport: httpx.BaseTransport | None = None):
         self.settings, self.demo = settings, demo
         self.lock = threading.RLock()
         self.stop_event = threading.Event()
@@ -287,6 +342,14 @@ class Monitor:
             );
             CREATE INDEX IF NOT EXISTS events_by_listing ON events(id, event_id DESC);
         """)
+        columns = {row[1] for row in self.db.execute("PRAGMA table_info(events)")}
+        for name, declaration in {"details_json": "TEXT NOT NULL DEFAULT '{}'", "trading_message": "TEXT"}.items():
+            if name not in columns:
+                self.db.execute(f"ALTER TABLE events ADD COLUMN {name} {declaration}")
+        self.db.commit()
+        from .notifications import DiscordDispatcher
+        self.discord = DiscordDispatcher(self.db, self.lock, config_path=discord_config_path,
+                                         demo=demo, transport=discord_transport)
         self.status: dict[str, Any] = {
             "phase": "starting", "message": "Initialisation : la première réponse sert de référence sans alerte.",
             "last_poll_at": None, "last_success_at": None, "next_poll_at": None,
@@ -327,10 +390,12 @@ class Monitor:
                 kind = "baseline" if baseline else ("new" if old is None else "price_change")
                 age = (detected_time - parse_time(listing["created_at"])).total_seconds() if listing["created_at"] else None
                 cursor = self.db.execute("""INSERT INTO events
-                    (id,weapon,name,price,seller,seller_status,created_at,detected_at,api_age_seconds,request_ms,kind,url)
-                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    (id,weapon,name,price,seller,seller_status,created_at,detected_at,api_age_seconds,request_ms,kind,url,details_json,trading_message)
+                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                     (listing["id"], listing["weapon"], listing["name"], listing["price"], listing["seller"],
-                     listing["seller_status"], listing["created_at"], detected, age, request_ms, kind, listing["url"]))
+                     listing["seller_status"], listing["created_at"], detected, age, request_ms, kind, listing["url"],
+                     json.dumps({k: listing[k] for k in ("weapon_label", "full_name", "attributes", "rerolls", "mastery_level")}),
+                     listing["trading_message"]))
                 receipt = self.pending_aleca.pop((listing["id"], listing["price"]), None)
                 if receipt is not None and kind != "baseline":
                     lead = (parse_time(receipt) - detected_time).total_seconds()
@@ -338,6 +403,7 @@ class Monitor:
                                     (receipt, lead, cursor.lastrowid))
                 if kind != "baseline":
                     alerts += 1
+                    self.discord.enqueue({**listing, "event_id": cursor.lastrowid, "kind": kind, "detected_at": detected})
                     print(json.dumps({"event": kind, "id": listing["id"], "price": listing["price"],
                                       "detected_at": detected, "mode": "demo" if self.demo else "live"}), flush=True)
             self.status.update(seeded=True, last_success_at=detected, request_ms=request_ms,
@@ -349,19 +415,31 @@ class Monitor:
     def state(self) -> dict[str, Any]:
         with self.lock:
             # Only the latest observation event for an auction appears in the UI.
-            rows = self.db.execute("""SELECT * FROM events WHERE weapon=? AND event_id IN
-                (SELECT MAX(event_id) FROM events GROUP BY id) ORDER BY event_id DESC LIMIT 200""",
-                (self.settings.weapon,)).fetchall()
+            where, params = self.event_filter()
+            rows = self.db.execute(f"""SELECT * FROM events WHERE ({where}) AND event_id IN
+                (SELECT MAX(event_id) FROM events GROUP BY id) ORDER BY event_id DESC LIMIT 200""", params).fetchall()
             comparisons = [r[0] for r in self.db.execute(
-                "SELECT lead_seconds FROM events WHERE weapon=? AND lead_seconds IS NOT NULL AND kind != 'baseline'",
-                (self.settings.weapon,))]
+                f"SELECT lead_seconds FROM events WHERE ({where}) AND lead_seconds IS NOT NULL AND kind != 'baseline'", params)]
+            offers = []
+            for row in rows:
+                offer = dict(row)
+                details = json.loads(offer.pop("details_json") or "{}")
+                offer.update(details)
+                watch = self.settings.watch_for(offer["weapon"])
+                offer.setdefault("weapon_label", watch.label)
+                offer.setdefault("full_name", f"{watch.label} {offer['name']}")
+                offers.append(offer)
             return {
-                "version": VERSION, "mode": "demo" if self.demo else "live", "config": vars(self.settings),
-                "status": dict(self.status), "offers": [dict(row) for row in rows],
+                "version": VERSION, "mode": "demo" if self.demo else "live", "config": self.settings.public(),
+                "status": dict(self.status), "offers": offers, "discord": self.discord.state(),
                 "comparison": {"count": len(comparisons), "median_lead_seconds": statistics.median(comparisons) if comparisons else None,
                                "pending_count": len(self.pending_aleca)},
                 "clock": utc_now(),
             }
+
+    def event_filter(self) -> tuple[str, tuple[Any, ...]]:
+        return (" OR ".join("(weapon=? AND price BETWEEN ? AND ?)" for _ in self.settings.watches),
+                tuple(value for watch in self.settings.watches for value in (watch.weapon, watch.min_price, watch.max_price)))
 
     def compare(self, auction_id: str, received_at: str | None = None, event_id: int | None = None) -> None:
         received = parse_time(received_at) if received_at else datetime.now(timezone.utc)
@@ -381,7 +459,7 @@ class Monitor:
 
     def record_aleca(self, auction_input: str, price: int, received_at: str | None = None) -> None:
         auction_id = auction_id_from_input(auction_input)
-        if isinstance(price, bool) or not isinstance(price, int) or not self.settings.min_price <= price <= self.settings.max_price:
+        if isinstance(price, bool) or not isinstance(price, int) or not any(w.min_price <= price <= w.max_price for w in self.settings.watches):
             raise ValueError("Le prix d'achat immédiat doit correspondre à la fourchette surveillée.")
         received = parse_time(received_at) if received_at else datetime.now(timezone.utc)
         if abs((received - datetime.now(timezone.utc)).total_seconds()) > 300:
@@ -402,7 +480,8 @@ class Monitor:
 
     def export_csv(self) -> str:
         with self.lock:
-            rows = self.db.execute("SELECT * FROM events WHERE weapon=? ORDER BY event_id", (self.settings.weapon,)).fetchall()
+            where, params = self.event_filter()
+            rows = self.db.execute(f"SELECT * FROM events WHERE ({where}) ORDER BY event_id", params).fetchall()
             columns = [d[0] for d in self.db.execute("SELECT * FROM events LIMIT 0").description]
             output = io.StringIO(newline="")
             writer = csv.writer(output)
@@ -468,6 +547,7 @@ class Monitor:
             self.stop_event.wait(delay)
 
     def start(self) -> None:
+        self.discord.start()
         self.thread = threading.Thread(target=self.run, name="riven-poller", daemon=True)
         self.thread.start()
 
@@ -475,5 +555,6 @@ class Monitor:
         self.stop_event.set()
         if self.thread:
             self.thread.join(timeout=20)
+        self.discord.close()
         self.client.close()
         self.db.close()

@@ -33,7 +33,7 @@ class StubClient:
 
 class FilteringTests(unittest.TestCase):
     def setUp(self):
-        self.settings = Settings()
+        self.settings = Settings.single()
 
     def test_buyout_is_used_even_when_starting_bid_is_in_range(self):
         self.assertFalse(normalize(auction(price=2001, starting_price=10), self.settings)["eligible"])
@@ -80,7 +80,7 @@ class FilteringTests(unittest.TestCase):
                         {"interval_seconds": float("inf")}, {"min_price": -1},
                         {"min_price": 11, "max_price": 10}]:
             with self.subTest(changes=changes), self.assertRaises(ValueError):
-                Settings(**changes)
+                Settings.single(**changes)
 
 
 class AuctionInputTests(unittest.TestCase):
@@ -111,7 +111,7 @@ class MonitorTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.database = Path(self.temp.name) / "observations.sqlite3"
-        self.monitor = Monitor(Settings(), self.database, client=StubClient())
+        self.monitor = Monitor(Settings.single(), self.database, client=StubClient())
         self.output = io.StringIO()
         self.stdout = contextlib.redirect_stdout(self.output)
         self.stdout.__enter__()
@@ -161,7 +161,7 @@ class MonitorTests(unittest.TestCase):
         self.monitor.ingest([auction()], 1)
         event_id = self.monitor.state()["offers"][0]["event_id"]
         self.monitor.close()
-        self.monitor = Monitor(Settings(), self.database, client=StubClient())
+        self.monitor = Monitor(Settings.single(), self.database, client=StubClient())
         self.assertEqual(self.monitor.ingest([auction()], 1), 0)
         self.assertEqual(self.monitor.state()["offers"][0]["event_id"], event_id)
         self.assertEqual(len(list(csv.DictReader(io.StringIO(self.monitor.export_csv())))), 1)
@@ -297,7 +297,7 @@ class MonitorTests(unittest.TestCase):
 
 class MarketClientTests(unittest.TestCase):
     def make_client(self, handler):
-        client = MarketClient(Settings(), transport=httpx.MockTransport(handler))
+        client = MarketClient(Settings.single(), transport=httpx.MockTransport(handler))
         self.addCleanup(client.close)
         return client
 
@@ -383,7 +383,7 @@ class StopAfterWait:
 
 class SchedulerTests(unittest.TestCase):
     def make_monitor(self, client):
-        monitor = Monitor(Settings(), ":memory:", client=client)
+        monitor = Monitor(Settings.single(), ":memory:", client=client)
         monitor.stop_event = StopAfterWait()
         self.addCleanup(monitor.close)
         return monitor
