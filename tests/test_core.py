@@ -390,7 +390,7 @@ class SchedulerTests(unittest.TestCase):
 
     def test_fast_success_waits_out_the_one_second_cadence(self):
         class Client(StubClient):
-            def search(self):
+            def search(self, source="recent"):
                 return [], 10
 
         monitor = self.make_monitor(Client())
@@ -401,7 +401,7 @@ class SchedulerTests(unittest.TestCase):
 
     def test_quota_backoff_honors_server_retry_after(self):
         class Client(StubClient):
-            def search(self):
+            def search(self, source="recent"):
                 raise ApiFailure("quota", retry_after=17)
 
         monitor = self.make_monitor(Client())
@@ -413,7 +413,7 @@ class SchedulerTests(unittest.TestCase):
         class Client(StubClient):
             calls = 0
 
-            def search(self):
+            def search(self, source="recent"):
                 self.calls += 1
                 raise ApiFailure("forbidden", blocked=True)
 

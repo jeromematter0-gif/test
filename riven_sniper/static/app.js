@@ -20,6 +20,7 @@
   let activeWeapon = '';
   let discordBusy = false;
   let lastDiscordSignature = '';
+  let lastSourcesSignature = '';
 
   $('weapon-filter').addEventListener('change', () => {
     activeWeapon = $('weapon-filter').value;
@@ -261,7 +262,8 @@
     seller.append(sellerDot, element('span', 'seller-name', offer.seller || 'Vendeur inconnu'));
     offerCell.append(seller);
     const kind = ['new', 'price_change', 'baseline'].includes(offer.kind) ? offer.kind : 'baseline';
-    offerCell.append(element('span', `kind-tag ${kind}`, { new: 'NOUVELLE OFFRE', price_change: 'PRIX MODIFIÉ', baseline: 'ÉTAT INITIAL' }[kind]));
+    offerCell.append(element('span', `kind-tag ${kind}`, { new: 'OFFRE DÉTECTÉE', price_change: 'OFFRE MISE À JOUR', baseline: 'RÉFÉRENCE INITIALE' }[kind]));
+    offerCell.append(element('span', 'time-detail', offer.source_label || 'Flux récent global'));
 
     const priceCell = element('td');
     const price = element('div', 'offer-price', number(offer.price) === null ? '—' : integer.format(offer.price));
@@ -277,6 +279,7 @@
     const createdDate = date(offer.created_at);
     if (createdDate) createdDetail.title = `Création déclarée : ${fullDateFormat.format(createdDate)}. Cet âge ne mesure pas la latence de publication.`;
     detectedCell.append(createdDetail);
+    if (offer.updated_at) detectedCell.append(element('span', 'time-detail', `Édition API ${time(offer.updated_at)}`));
 
     const compareCell = element('td');
     const lead = number(offer.lead_seconds);
@@ -365,6 +368,7 @@
     $('demo-banner').hidden = !isDemo;
     const phase = status.phase || 'starting';
     $('phase-label').textContent = { starting: 'Connexion à l’API', polling: 'Requête API en cours', watching: isDemo ? 'Simulation en cours' : 'Surveillance active', backoff: 'Collecte en échec · nouvelle tentative prévue', blocked: 'Accès à l’API bloqué', error: 'Surveillance interrompue' }[phase] || 'État de la surveillance';
+    if (phase === 'watching' && status.warmup_remaining > 0) $('phase-label').textContent = `Initialisation : ${status.warmup_remaining} source(s) en attente`;
     $('status-dot').className = `status-dot ${phase === 'watching' || (phase === 'polling' && status.seeded) ? 'active' : (phase === 'error' || phase === 'blocked') ? 'error' : 'warning'}`;
     $('phase-message').textContent = status.message || 'En attente de nouvelles offres.';
     $('last-success').textContent = time(status.last_success_at);
@@ -418,6 +422,25 @@
       ? `Nouvel essai ${secondsUntilRetry === null ? 'en attente' : `dans ${integer.format(secondsUntilRetry)} s`} · cible ${duration(config.interval_seconds)}`
       : ['blocked', 'error'].includes(phase) ? 'aucune surveillance effective'
       : `Cadence cible hors erreurs${number(status.last_attempt_interval_seconds) === null ? '' : ` · dernier intervalle ${duration(status.last_attempt_interval_seconds)}`}`;
+    const sources = Array.isArray(next.sources) ? next.sources : [];
+    $('sources-summary').textContent = `${sources.filter((s) => s.ready).length}/${sources.length} références reçues`;
+    const sourceCount = Math.max(1, sources.length);
+    const minCycle = (number(config.interval_seconds) ?? 1) * sourceCount;
+    const measuredCycle = number(status.last_attempt_interval_seconds) === null ? null : status.last_attempt_interval_seconds * sourceCount;
+    $('sources-cadence').textContent = `${sourceCount} source(s) en rotation · budget commun : au plus une requête toutes les ${duration(config.interval_seconds)} · cycle au minimum ${duration(minCycle)}${measuredCycle === null ? '' : `, estimation avec le dernier intervalle : ${duration(measuredCycle)}`}. Une arme n’est pas interrogée à chaque seconde. ${integer.format(number(status.ignored_stale) ?? 0)} observation(s) plus ancienne(s) ignorée(s).`;
+    const sourcesSignature = JSON.stringify(sources);
+    if (sourcesSignature !== lastSourcesSignature) {
+      const rows = document.createDocumentFragment();
+      for (const source of sources) {
+        const row = element('tr');
+        row.append(element('td', '', source.label), element('td', '', time(source.last_success_at)),
+          element('td', '', integer.format(source.returned_count || 0)), element('td', '', time(source.snapshot_changed_at)),
+          element('td', source.possibly_limited || source.last_error ? 'source-warning' : '', source.last_error || (!source.ready ? 'Référence en attente' : source.possibly_limited ? 'Réponse possiblement limitée' : 'Référence reçue')));
+        rows.append(row);
+      }
+      $('sources-body').replaceChildren(rows);
+      lastSourcesSignature = sourcesSignature;
+    }
     $('new-count').textContent = integer.format(offers.filter((offer) => offer.kind !== 'baseline').length);
     const attemptDuration = number(status.last_attempt_ms) ?? number(status.request_ms);
     $('request-duration').replaceChildren(document.createTextNode(attemptDuration === null ? '—' : integer.format(attemptDuration)));

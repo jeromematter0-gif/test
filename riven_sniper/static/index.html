@@ -12,7 +12,7 @@
   <body>
     <div class="app-shell">
       <header class="topbar">
-        <a class="brand" href="/" aria-label="Riven Sniper, accueil"><span class="brand-mark" aria-hidden="true">⌖</span><span>RIVEN<span class="brand-light">SNIPER</span></span><span class="version">03</span></a>
+        <a class="brand" href="/" aria-label="Riven Sniper, accueil"><span class="brand-mark" aria-hidden="true">⌖</span><span>RIVEN<span class="brand-light">SNIPER</span></span><span class="version">04</span></a>
         <div class="header-meta"><span class="platform">PC <span aria-hidden="true">/</span> CROSS-SAVE</span><span id="mode-badge" class="mode-badge">CONNEXION</span></div>
       </header>
 
@@ -40,7 +40,14 @@
           <div class="watch-cadence"><span class="field-label">ÉTAT DE LA COLLECTE</span><div id="interval">Connexion…</div><span class="weapon-detail" id="cadence-detail">cadence cible : 1 s si les requêtes réussissent</span></div>
           <div id="watch-list" class="watch-list"></div>
         </section>
-        <p id="coverage-warning" class="coverage-warning">Instantané global récent : la couverture dépend du cache et de la taille du flux. Une consultation chaque seconde ne garantit pas une détection en une seconde.</p>
+        <p id="coverage-warning" class="coverage-warning">Flux récent et recherches par arme partagent le même budget réseau. La couverture dépend du cache et des limites de chaque réponse.</p>
+
+        <section class="sources-panel" aria-labelledby="sources-title">
+          <div class="sources-heading"><h2 id="sources-title">Sources de détection</h2><span id="sources-summary">Initialisation…</span></div>
+          <p id="sources-cadence">Les sources sont interrogées en rotation, sans requêtes parallèles.</p>
+          <div class="table-wrap"><table><thead><tr><th>SOURCE</th><th>DERNIÈRE RÉPONSE</th><th>RÉSULTATS</th><th>DERNIÈRE VARIATION</th><th>ÉTAT</th></tr></thead><tbody id="sources-body"></tbody></table></div>
+          <p class="sources-help">Une réponse réussie confirme l’accès, pas une couverture exhaustive. Une recherche triée par prix peut être limitée : une offre absente des résultats restera manquée. La variation suit les identifiants, prix et dates d’édition reçus ; une réponse inchangée n’est pas une preuve de cache.</p>
+        </section>
 
         <details id="discord-settings" class="discord-panel" open>
           <summary><span>Alertes Discord</span><span id="discord-summary">Webhook à configurer</span></summary>

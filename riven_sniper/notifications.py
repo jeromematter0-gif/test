@@ -55,11 +55,12 @@ def discord_payload(event: dict[str, Any], *, demo: bool = False) -> dict[str, A
         sign = "−" if attr["value"] < 0 or not attr.get("positive", True) else "+"
         attributes.append(f"{sign}{abs(attr['value']):g} · {attr['name']}")
     fields.append({"name": "Attributs", "value": "\n".join(attributes)[:1000] or "Non fournis par le flux", "inline": False})
+    fields.append({"name": "Détecté via", "value": str(event.get("source_label") or "Flux récent global")[:200], "inline": False})
     message = event.get("trading_message")
     if message:
         fields.append({"name": "Message à copier", "value": code_block(message), "inline": False})
     embed = {"title": prefix + title, "color": 0xB174D9, "fields": fields,
-             "footer": {"text": "Riven Sniper · PC · " + ("Offre mise à jour" if event.get("kind") == "price_change" else "Nouvelle offre")}}
+             "footer": {"text": "Riven Sniper · PC · " + ("Offre mise à jour" if event.get("kind") == "price_change" else "Offre détectée")}}
     if event.get("url") and not demo:
         embed["url"] = event["url"]
     if event.get("detected_at"):

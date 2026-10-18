@@ -15,6 +15,8 @@ def main() -> None:
     parser.add_argument("--open", action="store_true", help="Ouvrir le tableau de bord dans le navigateur local.")
     parser.add_argument("--diagnose", action="store_true", help="Une tentative HTTPS, rapport diagnostic sans identifiants, puis arrêt.")
     parser.add_argument("--interval", type=float, default=1.0, help="Secondes entre deux débuts de requête (minimum 1).")
+    parser.add_argument("--collection", choices=["hybrid", "recent", "weapons"], default="hybrid",
+                        help="hybrid : récents + recherches par arme ; recent : ancien flux seul ; weapons : armes seules.")
     parser.add_argument("--weapon", choices=[w.weapon for w in DEFAULT_WATCHES], help="Surveiller une seule arme plutôt que les cinq.")
     parser.add_argument("--min-price", type=int, help="Seuil personnalisé en mode une arme.")
     parser.add_argument("--max-price", type=int, help="Seuil personnalisé en mode une arme.")
@@ -25,9 +27,10 @@ def main() -> None:
         if args.weapon or args.min_price is not None or args.max_price is not None:
             watch = next(w for w in DEFAULT_WATCHES if w.weapon == (args.weapon or "dual_toxocyst"))
             settings = Settings.single(weapon=watch.weapon, min_price=watch.min_price if args.min_price is None else args.min_price,
-                                       max_price=watch.max_price if args.max_price is None else args.max_price, interval_seconds=args.interval)
+                                       max_price=watch.max_price if args.max_price is None else args.max_price,
+                                       interval_seconds=args.interval, collection_mode=args.collection)
         else:
-            settings = Settings(interval_seconds=args.interval)
+            settings = Settings(interval_seconds=args.interval, collection_mode=args.collection)
     except ValueError as exc:
         parser.error(str(exc))
     args.data_dir.mkdir(parents=True, exist_ok=True)

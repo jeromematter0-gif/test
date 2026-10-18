@@ -99,7 +99,7 @@ class FailureReportingTests(unittest.TestCase):
 
     def test_twenty_three_failed_attempts_never_become_a_successful_monitor(self):
         class Client:
-            def search(self):
+            def search(self, source="recent"):
                 raise ApiFailure("Connexion impossible", kind="network", duration_ms=65)
 
             def close(self):
@@ -139,7 +139,7 @@ class FailureReportingTests(unittest.TestCase):
         class Client:
             calls = 0
 
-            def search(self):
+            def search(self, source="recent"):
                 self.calls += 1
                 if self.calls == 1:
                     raise ApiFailure("Temporaire", kind="timeout")

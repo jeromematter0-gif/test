@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import csv
 import errno
+import hashlib
 import io
 import json
 import math
@@ -25,7 +26,8 @@ import httpx
 import certifi
 
 API_URL = "https://api.warframe.market/v1/auctions"
-VERSION = "0.3.0"
+VERSION = "0.4.0"
+SEARCH_URL = API_URL + "/search"
 
 
 def utc_now() -> str:
@@ -82,26 +84,34 @@ class Settings:
     watches: tuple[Watch, ...] = DEFAULT_WATCHES
     interval_seconds: float = 1.0
     platform: str = "pc"
+    collection_mode: str = "hybrid"
 
     def __post_init__(self) -> None:
         if not math.isfinite(self.interval_seconds) or self.interval_seconds < 1:
             raise ValueError("La cadence minimale est de 1 seconde, partagée par ce processus.")
         if not self.watches or len({w.weapon for w in self.watches}) != len(self.watches):
             raise ValueError("Définir au moins une recherche, sans arme en double.")
+        if self.collection_mode not in {"hybrid", "recent", "weapons"}:
+            raise ValueError("Mode de collecte inconnu.")
 
     def watch_for(self, weapon: str) -> Watch | None:
         return next((w for w in self.watches if w.weapon == weapon), None)
 
     def public(self) -> dict[str, Any]:
-        return {"watches": [vars(w) for w in self.watches], "interval_seconds": self.interval_seconds, "platform": self.platform}
+        return {"watches": [vars(w) for w in self.watches], "interval_seconds": self.interval_seconds,
+                "platform": self.platform, "collection_mode": self.collection_mode, "sources": list(self.sources())}
+
+    def sources(self) -> tuple[str, ...]:
+        weapons = tuple("weapon:" + w.weapon for w in self.watches)
+        return ("recent",) if self.collection_mode == "recent" else weapons if self.collection_mode == "weapons" else ("recent",) + weapons
 
     @classmethod
     def single(cls, *, weapon: str = "dual_toxocyst", min_price: int = 10, max_price: int = 2000,
-               interval_seconds: float = 1.0) -> Settings:
+               interval_seconds: float = 1.0, collection_mode: str = "hybrid") -> Settings:
         label = next((w.label for w in DEFAULT_WATCHES if w.weapon == weapon), None)
         if label is None:
             raise ValueError("Arme non prise en charge.")
-        return cls(watches=(Watch(weapon, label, min_price, max_price),), interval_seconds=interval_seconds)
+        return cls(watches=(Watch(weapon, label, min_price, max_price),), interval_seconds=interval_seconds, collection_mode=collection_mode)
 
 
 class ApiFailure(Exception):
@@ -193,18 +203,26 @@ class MarketClient:
             transport=transport,
         )
 
-    def search(self) -> tuple[list[dict[str, Any]], float]:
+    def search(self, source: str = "recent") -> tuple[list[dict[str, Any]], float]:
+        params = None
+        if source != "recent":
+            weapon = source.removeprefix("weapon:") if source.startswith("weapon:") else ""
+            if self.settings.watch_for(weapon) is None:
+                raise ValueError("Source de collecte invalide.")
+            params = {"type": "riven", "weapon_url_name": weapon, "buyout_policy": "with", "sort_by": "price_asc"}
+        self.last_response_meta = {"source": source, "api_endpoint": str(httpx.URL(API_URL if params is None else SEARCH_URL, params=params))}
         start = time.perf_counter()
         try:
-            # The public recent snapshot avoids sorting a weapon's offers by price,
-            # which can hide newly listed, more expensive offers. No cache busting.
-            response = self.client.get(API_URL)
+            # Complement the recent feed with documented per-weapon searches.
+            # Both share the same scheduler/connection. No cache-busting parameters.
+            response = self.client.get(API_URL if params is None else SEARCH_URL, params=params)
         except httpx.HTTPError as exc:
             # Proxy URLs and credentials must never leak through exception text.
             elapsed = round((time.perf_counter() - start) * 1000, 2)
             raise connection_failure(exc, elapsed) from exc
         elapsed = round((time.perf_counter() - start) * 1000, 2)
         self.last_response_meta = {
+            "source": source, "api_endpoint": str(response.request.url),
             "last_http_status": response.status_code,
             "api_date": response.headers.get("Date"),
             "api_cache_age_seconds": retry_delay(response.headers.get("Age")),
@@ -247,7 +265,7 @@ class DemoClient:
         self.started = time.monotonic()
         self.created = utc_now()
 
-    def search(self) -> tuple[list[dict[str, Any]], float]:
+    def search(self, source: str = "recent") -> tuple[list[dict[str, Any]], float]:
         count = min(25, 1 + int((time.monotonic() - self.started) // 6))
         auctions = []
         for i in range(count):
@@ -263,6 +281,8 @@ class DemoClient:
                          "attributes": [{"url_name": "critical_chance", "value": 123.4, "positive": True},
                                         {"url_name": "damage", "value": 85.2, "positive": True}]},
             })
+        if source.startswith("weapon:"):
+            auctions = [a for a in auctions if a["item"]["weapon_url_name"] == source.removeprefix("weapon:")]
         return list(reversed(auctions)), 0.0
 
     def close(self) -> None:
@@ -293,6 +313,11 @@ def normalize(raw: dict[str, Any], settings: Settings, *, demo: bool = False) ->
             parse_time(created)
         except ValueError:
             created = None
+    updated = raw.get("updated")
+    try:
+        updated = parse_time(updated).isoformat(timespec="milliseconds") if isinstance(updated, str) else None
+    except ValueError:
+        updated = None
     name = " ".join(str(item.get("name") or "Riven").split())[:200]
     full_name = name if name.casefold().startswith(watch.label.casefold()) else f"{watch.label} {name[:1].upper()}{name[1:]}"
     seller = str(owner.get("ingame_name") or "Vendeur inconnu")[:100]
@@ -312,7 +337,7 @@ def normalize(raw: dict[str, Any], settings: Settings, *, demo: bool = False) ->
         "price": price if valid_price else None,
         "seller": seller,
         "seller_status": str(owner.get("status") or "unknown"),
-        "created_at": created, "eligible": eligible,
+        "created_at": created, "updated_at": updated, "eligible": eligible,
         "url": None if demo else f"https://warframe.market/auction/{auction_id}",
         "trading_message": trading_message,
         "attributes": attributes[:8], "rerolls": integer_detail("re_rolls"), "mastery_level": integer_detail("mastery_level"),
@@ -343,9 +368,12 @@ class Monitor:
             CREATE INDEX IF NOT EXISTS events_by_listing ON events(id, event_id DESC);
         """)
         columns = {row[1] for row in self.db.execute("PRAGMA table_info(events)")}
-        for name, declaration in {"details_json": "TEXT NOT NULL DEFAULT '{}'", "trading_message": "TEXT"}.items():
+        for name, declaration in {"details_json": "TEXT NOT NULL DEFAULT '{}'", "trading_message": "TEXT",
+                                  "source": "TEXT NOT NULL DEFAULT 'recent'", "updated_at": "TEXT"}.items():
             if name not in columns:
                 self.db.execute(f"ALTER TABLE events ADD COLUMN {name} {declaration}")
+        if "revision" not in {row[1] for row in self.db.execute("PRAGMA table_info(seen)")}:
+            self.db.execute("ALTER TABLE seen ADD COLUMN revision REAL")
         self.db.commit()
         from .notifications import DiscordDispatcher
         self.discord = DiscordDispatcher(self.db, self.lock, config_path=discord_config_path,
@@ -362,54 +390,84 @@ class Monitor:
             "last_error_details": None,
             "last_attempt_interval_seconds": None, "request_in_flight": False,
             "api_endpoint": API_URL,
-            "coverage_warning": "Instantané global récent : cache, ordre et taille non vérifiés. Des annonces peuvent manquer entre deux mises à jour ; 1 s est la cadence de consultation, pas un délai garanti après publication.",
+            "coverage_warning": "Récents + recherches par arme partagent un seul budget réseau. Les réponses peuvent être limitées ou mises en cache : couverture exhaustive et délai de détection non garantis.",
+            "last_source": None, "warmup_remaining": len(settings.sources()), "ignored_stale": 0,
         }
+        self.sources_ready: set[str] = set()
+        self.source_status = {source: {"id": source, "label": self.source_label(source), "ready": False,
+                                      "attempts": 0, "successes": 0, "last_success_at": None,
+                                      "returned_count": 0, "last_error": None, "snapshot_changed_at": None,
+                                      "unchanged_responses": 0, "possibly_limited": False}
+                              for source in settings.sources()}
         self.pending_aleca: dict[tuple[str, int], str] = {}
         self.thread: threading.Thread | None = None
 
-    def ingest(self, auctions: list[dict[str, Any]], request_ms: float, *, observed_at: str | None = None) -> int:
+    def source_label(self, source: str) -> str:
+        watch = self.settings.watch_for(source.removeprefix("weapon:"))
+        return "Recherche " + watch.label if watch else "Flux récent global"
+
+    def ingest(self, auctions: list[dict[str, Any]], request_ms: float, *, observed_at: str | None = None,
+               source: str = "recent", response_meta: dict[str, Any] | None = None) -> int:
         detected = observed_at or utc_now()
         detected_time = parse_time(detected)
         with self.lock, self.db:
-            baseline = not self.status["seeded"]
+            first_response = not self.status["seeded"]
+            source_baseline = source not in self.sources_ready
             alerts = 0
             initial_count = 0
             for raw in reversed(auctions):
                 listing = normalize(raw, self.settings, demo=self.demo)
                 if listing is None:
                     continue
-                old = self.db.execute("SELECT price, eligible FROM seen WHERE id=?", (listing["id"],)).fetchone()
+                old = self.db.execute("SELECT price, eligible, revision FROM seen WHERE id=?", (listing["id"],)).fetchone()
+                revision = parse_time(listing["updated_at"]).timestamp() if listing["updated_at"] else None
+                if old is not None and old["revision"] is not None and revision is not None and revision < old["revision"]:
+                    self.status["ignored_stale"] += 1
+                    continue
                 eligible = listing["eligible"]
                 is_event = eligible and (old is None or not old["eligible"] or old["price"] != listing["price"])
-                self.db.execute("INSERT INTO seen VALUES (?, ?, ?) ON CONFLICT(id) DO UPDATE SET price=excluded.price, eligible=excluded.eligible",
-                                (listing["id"], listing["price"], int(eligible)))
-                if baseline and eligible:
-                    initial_count += 1
+                self.db.execute("INSERT INTO seen(id,price,eligible,revision) VALUES (?,?,?,?) ON CONFLICT(id) DO UPDATE SET price=excluded.price, eligible=excluded.eligible, revision=COALESCE(excluded.revision,seen.revision)",
+                                (listing["id"], listing["price"], int(eligible), revision))
                 if not is_event:
                     continue
-                kind = "baseline" if baseline else ("new" if old is None else "price_change")
+                kind = "baseline" if first_response or (source_baseline and old is None) else ("new" if old is None else "price_change")
+                if kind == "baseline":
+                    initial_count += 1
                 age = (detected_time - parse_time(listing["created_at"])).total_seconds() if listing["created_at"] else None
                 cursor = self.db.execute("""INSERT INTO events
-                    (id,weapon,name,price,seller,seller_status,created_at,detected_at,api_age_seconds,request_ms,kind,url,details_json,trading_message)
-                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    (id,weapon,name,price,seller,seller_status,created_at,detected_at,api_age_seconds,request_ms,kind,url,details_json,trading_message,source,updated_at)
+                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                     (listing["id"], listing["weapon"], listing["name"], listing["price"], listing["seller"],
                      listing["seller_status"], listing["created_at"], detected, age, request_ms, kind, listing["url"],
                      json.dumps({k: listing[k] for k in ("weapon_label", "full_name", "attributes", "rerolls", "mastery_level")}),
-                     listing["trading_message"]))
-                receipt = self.pending_aleca.pop((listing["id"], listing["price"]), None)
+                     listing["trading_message"], source, listing["updated_at"]))
+                receipt = self.pending_aleca.pop((listing["id"], listing["price"]), None) if kind != "baseline" else None
                 if receipt is not None and kind != "baseline":
                     lead = (parse_time(receipt) - detected_time).total_seconds()
                     self.db.execute("UPDATE events SET aleca_seen_at=?,lead_seconds=? WHERE event_id=?",
                                     (receipt, lead, cursor.lastrowid))
                 if kind != "baseline":
                     alerts += 1
-                    self.discord.enqueue({**listing, "event_id": cursor.lastrowid, "kind": kind, "detected_at": detected})
+                    self.discord.enqueue({**listing, "event_id": cursor.lastrowid, "kind": kind, "detected_at": detected,
+                                          "source": source, "source_label": self.source_label(source)})
                     print(json.dumps({"event": kind, "id": listing["id"], "price": listing["price"],
-                                      "detected_at": detected, "mode": "demo" if self.demo else "live"}), flush=True)
+                                      "detected_at": detected, "source": source, "mode": "demo" if self.demo else "live"}), flush=True)
+            self.sources_ready.add(source)
             self.status.update(seeded=True, last_success_at=detected, request_ms=request_ms,
-                               returned_count=len(auctions))
-            if baseline:
-                self.status["baseline_count"] = initial_count
+                               returned_count=len(auctions), last_source=source,
+                               warmup_remaining=len(set(self.settings.sources()) - self.sources_ready))
+            self.status["baseline_count"] += initial_count
+            snapshot_values = sorted(((str(a.get("id")), a.get("buyout_price"), a.get("updated"), a.get("closed"), a.get("visible"))
+                                      for a in auctions), key=lambda row: row[0])
+            snapshot = hashlib.sha256(json.dumps(snapshot_values, default=str).encode()).hexdigest()
+            stats = self.source_status.setdefault(source, {"id": source, "label": self.source_label(source), "attempts": 0, "successes": 0})
+            changed = stats.get("fingerprint") != snapshot
+            stats.update(ready=True, successes=stats["successes"] + 1, last_success_at=detected,
+                         returned_count=len(auctions), last_error=None, fingerprint=snapshot,
+                         snapshot_changed_at=detected if changed else stats.get("snapshot_changed_at"),
+                         unchanged_responses=0 if changed else stats.get("unchanged_responses", 0) + 1,
+                         possibly_limited=len(auctions) >= 100,
+                         api_cache_age_seconds=(response_meta or {}).get("api_cache_age_seconds"))
             return alerts
 
     def state(self) -> dict[str, Any]:
@@ -428,13 +486,14 @@ class Monitor:
                 watch = self.settings.watch_for(offer["weapon"])
                 offer.setdefault("weapon_label", watch.label)
                 offer.setdefault("full_name", f"{watch.label} {offer['name']}")
+                offer["source_label"] = self.source_label(offer["source"])
                 offers.append(offer)
             return {
                 "version": VERSION, "mode": "demo" if self.demo else "live", "config": self.settings.public(),
                 "status": dict(self.status), "offers": offers, "discord": self.discord.state(),
                 "comparison": {"count": len(comparisons), "median_lead_seconds": statistics.median(comparisons) if comparisons else None,
                                "pending_count": len(self.pending_aleca)},
-                "clock": utc_now(),
+                "sources": [dict(s) for s in self.source_status.values()], "clock": utc_now(),
             }
 
     def event_filter(self) -> tuple[str, tuple[Any, ...]]:
@@ -495,23 +554,29 @@ class Monitor:
     def run(self) -> None:
         failures = 0
         previous_start: float | None = None
+        cycle = self.settings.sources()
+        cursor = 0
         while not self.stop_event.is_set():
             started = time.monotonic()
+            source = cycle[cursor % len(cycle)]
+            cursor += 1
             with self.lock:
                 self.status.update(last_poll_at=utc_now(), polls=self.status["polls"] + 1, next_poll_at=None,
                                    request_in_flight=True, backoff_seconds=0,
                                    phase="polling" if self.status["seeded"] else "starting",
-                                   message="Requête API en cours…",
+                                   message=self.source_label(source) + " : requête API en cours…",
                                    last_attempt_interval_seconds=round(started - previous_start, 3) if previous_start is not None else None)
+                self.status["last_source"] = source
+                self.source_status[source]["attempts"] += 1
             previous_start = started
             attempt_clock = time.perf_counter()
             try:
-                auctions, elapsed = self.client.search()
-                self.ingest(auctions, elapsed)
+                auctions, elapsed = self.client.search(source=source)
+                self.ingest(auctions, elapsed, source=source, response_meta=getattr(self.client, "last_response_meta", {}))
                 failures = 0
                 delay = max(0, self.settings.interval_seconds - (time.monotonic() - started))
                 with self.lock:
-                    self.status.update(phase="watching", message="Réponse API valide reçue. La couverture et la fraîcheur du flux restent à vérifier.",
+                    self.status.update(phase="watching", message=self.source_label(source) + " : réponse valide reçue. Consulter les limites de chaque source ci-dessous.",
                                        successful_polls=self.status["successful_polls"] + 1,
                                        consecutive_failures=0, request_in_flight=False, last_attempt_ms=elapsed,
                                        last_error=None, last_error_kind=None, last_error_details=None)
@@ -520,6 +585,7 @@ class Monitor:
                 failures += 1
                 delay = max(exc.retry_after or 0, min(120, 2 ** min(failures, 7)), self.settings.interval_seconds)
                 with self.lock:
+                    self.source_status[source]["last_error"] = str(exc)
                     self.status.update(phase="blocked" if exc.blocked else "backoff", message=str(exc),
                                        failed_polls=self.status["failed_polls"] + 1,
                                        consecutive_failures=failures, last_error=str(exc), last_error_at=utc_now(),
@@ -527,6 +593,9 @@ class Monitor:
                                        last_error_details=safe_failure_details(exc),
                                        last_attempt_ms=exc.duration_ms if exc.duration_ms is not None else round((time.perf_counter() - attempt_clock) * 1000, 2),
                                        request_in_flight=False, backoff_seconds=0 if exc.blocked else delay)
+                    meta = getattr(self.client, "last_response_meta", {})
+                    if meta.get("source") == source:
+                        self.status.update(meta)
                 print(json.dumps({"event": "api_failure", "at": self.status["last_error_at"],
                                   "message": str(exc), "kind": exc.kind, "http_status": exc.http_status,
                                   "failed_attempts": failures, "retry_in_seconds": None if exc.blocked else delay}, ensure_ascii=False), flush=True)

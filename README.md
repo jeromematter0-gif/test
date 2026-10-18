@@ -1,6 +1,8 @@
-# Riven Sniper · version 0.3.0
+# Riven Sniper · version 0.4.0
 
-Cinq recherches PC, une collecte commune et des alertes Discord avec les détails du Riven et le message `/w` prêt à copier.
+Cinq recherches PC, une rotation de sources sous un budget réseau commun et des alertes Discord avec les détails du Riven et le message `/w` prêt à copier.
+
+La version 0.3 ne consultait que l'instantané global récent, ce qui pouvait manquer des annonces et d'anciennes offres dont le prix avait changé. La version 0.4 y ajoute une recherche directe par arme. Cela élargit la collecte, mais ne prouve pas que toutes les offres sont renvoyées ni qu'elle devance toujours les autres outils.
 
 | Arme | Achat immédiat, bornes incluses |
 | --- | --- |
@@ -17,7 +19,7 @@ Aucun filtre de statistiques, rolls, polarité ou présence du vendeur. Un prix 
 1. Arrêter l'ancienne fenêtre du programme avec **Ctrl+C**.
 2. Extraire le nouveau ZIP dans un nouveau dossier.
 3. Avec Python **3.11 ou plus récent** installé, double-cliquer sur **`Lancer-Riven-Sniper.cmd`**. Il prépare les dépendances et ouvre le tableau local.
-4. Vérifier le repère **03** en haut du tableau et les cinq seuils affichés.
+4. Vérifier le repère **04** en haut du tableau, les cinq seuils et la section **Sources de détection**.
 
 Conserver la fenêtre de commande ouverte pendant la surveillance. Le navigateur peut ensuite être fermé : les alertes Discord continuent tant que le programme et le PC restent actifs.
 
@@ -41,7 +43,7 @@ Tu peux utiliser ton webhook existant. Son adresse doit rester sur ton PC ; ne p
 4. Cliquer sur **Envoyer un message de test**. Vérifier sa réception dans le salon et le compteur des messages envoyés.
 5. Laisser le programme ouvert. Les prochaines détections correspondant aux cinq recherches seront envoyées.
 
-La première collecte après chaque démarrage sert de référence **sans alerte**, et l'activation de Discord ne renvoie pas l'ancien historique. Le test du webhook, lui, est immédiat dès que Discord accepte l'envoi.
+Chaque source initialise une référence : les offres qu'elle découvre pour la première fois pendant cette étape apparaissent dans le radar sans alerte, pour éviter un rattrapage d'anciennes offres. Un prix différent pour une annonce déjà connue peut être détecté par une autre source. Attendre que les six références soient reçues pour comparer les nouvelles détections. L'activation de Discord ne renvoie pas l'ancien historique. Le test du webhook est immédiat dès que Discord accepte l'envoi.
 
 Les fiches contiennent l'arme, le nom complet du Riven, le prix, le vendeur et son statut, les rolls, le MR, les attributs disponibles dans le flux, le lien de l'annonce et un bloc de code avec le message d'achat :
 
@@ -58,13 +60,20 @@ Si nécessaire, créer un webhook dans les paramètres du salon Discord → **In
 ## Rapidité et livraison
 
 ```text
-API publique, une connexion persistante
-    → cinq filtres locaux + déduplication
+API publique, une connexion persistante et un seul ordonnanceur
+    → rotation : flux récent, Burston, Dual Toxocyst, Torid, Verglas, Magistar
+    → filtres locaux, comparaison des dates/prix et déduplication commune
     → journal SQLite + file Discord persistante
     → worker Discord indépendant → salon
 ```
 
-Ajouter ces cinq armes **n'ajoute aucune requête warframe.market** : les détails sont repris dans la même réponse. Une attente réseau côté Discord ne conserve pas le verrou du collecteur et ne bloque donc pas la collecte. Une file de messages peut néanmoins retarder les alertes Discord en cas de rafale ou de limitation.
+Le **budget maximal de départs de requêtes reste inchangé** : une requête à la fois, au plus une par seconde par défaut. Il est maintenant réparti entre six sources. Chaque source est donc consultée moins souvent que l'ancien flux seul : un cycle demande au minimum **6 secondes**, et environ 17 secondes si chaque réponse prend 2,8 secondes. Les erreurs et quotas l'allongent encore. Il ne s'agit pas de six requêtes par seconde ni d'une consultation de chaque arme toutes les secondes.
+
+Les recherches par arme peuvent retrouver une offre ancienne absente de l'instantané global, notamment après une baisse de prix. Les résultats sont triés par prix et filtrés localement. Aucun filtre min/max non documenté ni paramètre destiné à contourner un cache n'est ajouté. Une réponse limitée peut néanmoins masquer une partie des offres : une ligne de 100 résultats ou plus est signalée comme possiblement limitée. Ce signal est indicatif, pas une preuve de troncature. Une offre jamais renvoyée par les sources consultées restera manquée.
+
+La section **Sources de détection** montre la dernière réponse de chaque source, le nombre de résultats, la dernière variation de contenu et ses erreurs/limites. La dernière variation ne prouve pas la présence ou l'absence d'un cache. Chaque détection, fiche Discord et ligne CSV conserve sa provenance. La date d'édition API est conservée lorsqu'elle existe. Une réponse portant une date d'édition plus ancienne que la version déjà connue est ignorée ; sans dates d'édition comparables, cette protection ne peut pas garantir la cohérence des prix entre sources.
+
+Une attente réseau côté Discord ne conserve pas le verrou du collecteur et ne bloque pas la collecte. Une file de messages peut néanmoins retarder les alertes Discord en cas de rafale ou de limitation.
 
 Cadence de collecte cible : une requête par seconde, séquentielle. Une réponse de 2,8 secondes implique un intervalle réel d'au moins 2,8 secondes. Les erreurs transitoires entraînent des pauses progressives ; `Retry-After` est respecté. La confiance HTTPS conserve les certificats système et ajoute `certifi`, avec vérification du certificat et du nom d'hôte.
 
@@ -112,13 +121,15 @@ python -m riven_sniper --weapon dual_toxocyst --min-price 10 --max-price 2000 --
 
 `--interval` doit être ≥ 1 seconde. `--port` change le port local, par défaut 8765. `--data-dir` choisit le dossier de données. Le serveur écoute uniquement sur le PC local. Ne pas lancer plusieurs instances pour multiplier la cadence. Les processus doivent être relancés après restauration d'un environnement cloud ; les requêtes locales y servent à la validation, sans lien public de prévisualisation.
 
-Validation : **72 tests** couvrent les limites des cinq recherches, la migration de l'ancien historique, les données et messages d'achat, le diagnostic, la persistance de la file, la déduplication, les quotas/reprises Discord, les erreurs sans fuite du webhook et l'indépendance de la collecte pendant un envoi bloqué. Le parcours navigateur est vérifié avec un transport Discord simulé. Aucun vrai webhook utilisateur n'est employé dans les tests ; la réception réelle doit être validée par le bouton de test sur le PC. Les lanceurs Windows n'ont pas été exécutés dans ce cloud Linux.
+`--collection hybrid` est le nouveau mode par défaut (six sources). `--collection weapons` consulte uniquement les cinq recherches par arme ; `--collection recent` rétablit l'ancien flux global seul. Ces modes partagent tous le même budget de requêtes. Ils peuvent servir à comparer les comportements, sans lancer plusieurs instances en parallèle. Le diagnostic simple fait un seul appel au flux global ; l'état des autres sources est visible dans le tableau après démarrage.
+
+Validation : **83 tests** couvrent notamment un Burston ancien passant de 800 à 400 pl en dehors du flux récent, un Torid présent dans la recherche avant le flux global, les références initiales silencieuses, l'unicité des alertes entre sources, le rejet des réponses plus anciennes et le budget commun. Ces cas sont simulés et ne prouvent pas que l'annonce réelle signalée par l'utilisateur sera renvoyée par l'API. Les tests précédents de filtrage, migration, diagnostic et envoi Discord sont conservés. Aucun vrai webhook utilisateur n'est employé dans les tests ; la réception réelle doit être validée sur le PC. Les lanceurs Windows n'ont pas été exécutés dans ce cloud Linux.
 
 ## Source et limites
 
-Le flux utilisé reste `GET https://api.warframe.market/v1/auctions`, avec `Platform: pc`, sans compte ni secret warframe.market. Le flux global est limité en taille et peut être mis en cache : des annonces peuvent manquer entre deux mises à jour. La couverture exhaustive et une avance systématique sur AlecaFrame ne sont pas garanties. Aucun tri de nouveauté non documenté, contournement de cache ou canal privé n'est utilisé.
+Le flux global utilise `GET https://api.warframe.market/v1/auctions`. Les recherches complémentaires utilisent `GET /v1/auctions/search?type=riven&weapon_url_name=...&buyout_policy=with&sort_by=price_asc`, paramètres présents dans la spécification communautaire ancienne et des clients publics. Les deux utilisent `Platform: pc`, sans compte ni secret warframe.market. Leur compatibilité réelle et leur couverture restent à vérifier sur le PC. Les réponses peuvent être limitées ou mises en cache. La couverture exhaustive et une avance systématique sur AlecaFrame ne sont pas garanties. Aucun tri de nouveauté non documenté, contournement de cache ou canal privé n'est utilisé.
 
-L'accès au flux a fonctionné sur le PC de l'utilisateur avec la version 0.2. Le cloud a rencontré une page de protection HTTP 403 ; aucune protection n'est contournée. La cadence maximale actuelle doit être vérifiée dans la documentation du service : une requête/seconde est un réglage prudent, pas une certification actuelle des quotas.
+Le flux global et Discord ont fonctionné sur le PC de l'utilisateur avec les versions précédentes, avec des annonces manquées et des délais variables. Le nouveau test de recherche Burston dans le cloud reçoit encore une protection HTTP 403 : sa performance en conditions réelles n'est donc pas validée ici. Aucune protection n'est contournée. La cadence maximale actuelle doit être vérifiée dans la documentation du service : une requête/seconde est un réglage prudent, pas une certification actuelle des quotas.
 
 Le marché PC ne certifie pas l'éligibilité de chaque vendeur. La FAQ officielle précise les conditions Cross Platform Play, compte Cross Platform Save pour un joueur non-PC échangeant avec PC, TennoGuard 2FA et les restrictions du Platinum Nintendo Switch.
 
