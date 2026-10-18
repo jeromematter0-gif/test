@@ -15,8 +15,8 @@ def main() -> None:
     parser.add_argument("--open", action="store_true", help="Ouvrir le tableau de bord dans le navigateur local.")
     parser.add_argument("--diagnose", action="store_true", help="Une tentative HTTPS, rapport diagnostic sans identifiants, puis arrêt.")
     parser.add_argument("--interval", type=float, default=1.0, help="Secondes entre deux débuts de requête (minimum 1).")
-    parser.add_argument("--collection", choices=["hybrid", "recent", "weapons"], default="hybrid",
-                        help="hybrid : récents + recherches par arme ; recent : ancien flux seul ; weapons : armes seules.")
+    parser.add_argument("--collection", choices=["priority", "hybrid", "recent", "weapons"], default="priority",
+                        help="priority : récents prioritaires, recherches espacées ; hybrid : rotation égale ; recent : récents seuls ; weapons : armes seules.")
     parser.add_argument("--weapon", choices=[w.weapon for w in DEFAULT_WATCHES], help="Surveiller une seule arme plutôt que les cinq.")
     parser.add_argument("--min-price", type=int, help="Seuil personnalisé en mode une arme.")
     parser.add_argument("--max-price", type=int, help="Seuil personnalisé en mode une arme.")

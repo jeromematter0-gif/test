@@ -26,8 +26,9 @@ import httpx
 import certifi
 
 API_URL = "https://api.warframe.market/v1/auctions"
-VERSION = "0.4.1"
+VERSION = "0.4.2"
 SEARCH_URL = API_URL + "/search"
+SEARCH_GAP_SECONDS = 30.0
 
 
 def utc_now() -> str:
@@ -84,14 +85,14 @@ class Settings:
     watches: tuple[Watch, ...] = DEFAULT_WATCHES
     interval_seconds: float = 1.0
     platform: str = "pc"
-    collection_mode: str = "hybrid"
+    collection_mode: str = "priority"
 
     def __post_init__(self) -> None:
         if not math.isfinite(self.interval_seconds) or self.interval_seconds < 1:
             raise ValueError("La cadence minimale est de 1 seconde, partagée par ce processus.")
         if not self.watches or len({w.weapon for w in self.watches}) != len(self.watches):
             raise ValueError("Définir au moins une recherche, sans arme en double.")
-        if self.collection_mode not in {"hybrid", "recent", "weapons"}:
+        if self.collection_mode not in {"priority", "hybrid", "recent", "weapons"}:
             raise ValueError("Mode de collecte inconnu.")
 
     def watch_for(self, weapon: str) -> Watch | None:
@@ -99,7 +100,8 @@ class Settings:
 
     def public(self) -> dict[str, Any]:
         return {"watches": [vars(w) for w in self.watches], "interval_seconds": self.interval_seconds,
-                "platform": self.platform, "collection_mode": self.collection_mode, "sources": list(self.sources())}
+                "platform": self.platform, "collection_mode": self.collection_mode, "sources": list(self.sources()),
+                "search_gap_seconds": SEARCH_GAP_SECONDS if self.collection_mode == "priority" else None}
 
     def sources(self) -> tuple[str, ...]:
         weapons = tuple("weapon:" + w.weapon for w in self.watches)
@@ -107,7 +109,7 @@ class Settings:
 
     @classmethod
     def single(cls, *, weapon: str = "dual_toxocyst", min_price: int = 10, max_price: int = 2000,
-               interval_seconds: float = 1.0, collection_mode: str = "hybrid") -> Settings:
+               interval_seconds: float = 1.0, collection_mode: str = "priority") -> Settings:
         label = next((w.label for w in DEFAULT_WATCHES if w.weapon == weapon), None)
         if label is None:
             raise ValueError("Arme non prise en charge.")
@@ -451,6 +453,7 @@ class Monitor:
                                       "unchanged_responses": 0, "possibly_limited": False}
                               for source in settings.sources()}
         self.pending_aleca: dict[tuple[str, int], str] = {}
+        self.recent_attempts: list[dict[str, Any]] = []
         self.thread: threading.Thread | None = None
 
     def source_label(self, source: str) -> str:
@@ -463,6 +466,23 @@ class Monitor:
             self.db.execute("INSERT OR REPLACE INTO collector_pacing VALUES(1, ?, ?, ?, ?)",
                             (self.pacing.effective_interval, deadline, reason, retry_after))
             self.pacing_deadline = deadline
+
+    def record_attempt(self, source: str, *, wait_seconds: float) -> None:
+        with self.lock:
+            self.recent_attempts.append({
+                "started_at": self.status["last_poll_at"], "source": source,
+                "http_status": self.status["last_http_status"],
+                "duration_ms": self.status["last_attempt_ms"],
+                "error_kind": self.status["last_error_kind"],
+                "retry_after_seconds": self.status["server_retry_after_seconds"],
+                "wait_seconds": wait_seconds,
+                "effective_interval_seconds": self.status["effective_interval_seconds"],
+            })
+            del self.recent_attempts[:-60]
+
+    def attempt_history(self) -> list[dict[str, Any]]:
+        with self.lock:
+            return [dict(attempt) for attempt in self.recent_attempts]
 
     def ingest(self, auctions: list[dict[str, Any]], request_ms: float, *, observed_at: str | None = None,
                source: str = "recent", response_meta: dict[str, Any] | None = None) -> int:
@@ -614,6 +634,9 @@ class Monitor:
         previous_start: float | None = None
         cycle = self.settings.sources()
         cursor = 0
+        search_cursor = 0
+        next_search_at = 0.0
+        previous_source: str | None = None
         remaining = max(0, self.pacing_deadline - time.time()) if self.pacing_deadline is not None else 0
         if remaining:
             with self.lock:
@@ -625,8 +648,17 @@ class Monitor:
                 return
         while not self.stop_event.is_set():
             started = time.monotonic()
-            source = cycle[cursor % len(cycle)]
+            if self.settings.collection_mode == "priority":
+                if previous_source == "recent" and started >= next_search_at:
+                    source = cycle[1 + search_cursor % (len(cycle) - 1)]
+                    search_cursor += 1
+                    next_search_at = started + SEARCH_GAP_SECONDS
+                else:
+                    source = "recent"
+            else:
+                source = cycle[cursor % len(cycle)]
             cursor += 1
+            previous_source = source
             with self.lock:
                 self.status.update(last_poll_at=utc_now(), polls=self.status["polls"] + 1, next_poll_at=None,
                                    request_in_flight=True, backoff_seconds=0,
@@ -651,9 +683,11 @@ class Monitor:
                                        successful_polls=self.status["successful_polls"] + 1,
                                        consecutive_failures=0, request_in_flight=False, last_attempt_ms=elapsed,
                                        effective_interval_seconds=self.pacing.effective_interval,
+                                       last_http_status=None if self.demo else 200,
                                        server_retry_after_seconds=None, backoff_reason=None,
                                        last_error=None, last_error_kind=None, last_error_details=None)
                     self.status.update(getattr(self.client, "last_response_meta", {}))
+                self.record_attempt(source, wait_seconds=delay)
             except ApiFailure as exc:
                 failures += 1
                 quota = exc.kind == "quota" or exc.http_status == 429
@@ -678,6 +712,7 @@ class Monitor:
                     meta = getattr(self.client, "last_response_meta", {})
                     if meta.get("source") == source:
                         self.status.update(meta)
+                self.record_attempt(source, wait_seconds=0 if exc.blocked else delay)
                 print(json.dumps({"event": "api_failure", "at": self.status["last_error_at"],
                                   "message": str(exc), "kind": exc.kind, "http_status": exc.http_status,
                                   "effective_interval_seconds": self.pacing.effective_interval,

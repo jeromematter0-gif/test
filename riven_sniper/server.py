@@ -43,7 +43,9 @@ def create_server(monitor: Monitor, port: int = 8765) -> ThreadingHTTPServer:
                 self.json_reply(200, monitor.state())
             elif path == "/api/diagnostic.json":
                 state = monitor.state()
-                self.json_reply(200, {key: state[key] for key in ("version", "mode", "config", "status", "sources", "discord", "clock")})
+                report = {key: state[key] for key in ("version", "mode", "config", "status", "sources", "discord", "clock")}
+                report["recent_attempts"] = monitor.attempt_history()
+                self.json_reply(200, report)
             elif path == "/api/export.csv":
                 self.reply(200, ("\ufeff" + monitor.export_csv()).encode(), "text/csv; charset=utf-8")
             elif path in ("/", "/app.js", "/styles.css"):

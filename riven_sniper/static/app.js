@@ -353,6 +353,7 @@
     const status = next.status || {};
     const configuredInterval = number(config.interval_seconds) ?? 1;
     const effectiveInterval = number(status.effective_interval_seconds) ?? configuredInterval;
+    const priorityCollection = config.collection_mode === 'priority';
     const adaptedCadence = effectiveInterval > configuredInterval;
     const rateLimitCount = number(status.rate_limit_count) ?? 0;
     const quotaBackoff = status.phase === 'backoff' && (status.last_error_kind === 'quota' || status.last_http_status === 429);
@@ -374,7 +375,9 @@
     const phase = status.phase || 'starting';
     $('phase-label').textContent = { starting: 'Connexion à l’API', polling: 'Requête API en cours', watching: isDemo ? 'Simulation en cours' : 'Surveillance active', backoff: 'Collecte en échec · nouvelle tentative prévue', blocked: 'Accès à l’API bloqué', error: 'Surveillance interrompue' }[phase] || 'État de la surveillance';
     if (quotaBackoff) $('phase-label').textContent = 'Quota API · reprise prévue';
-    if (phase === 'watching' && status.warmup_remaining > 0) $('phase-label').textContent = `Initialisation : ${status.warmup_remaining} source(s) en attente`;
+    if (phase === 'watching' && status.warmup_remaining > 0) $('phase-label').textContent = priorityCollection
+      ? `Flux récent actif · ${status.warmup_remaining} référence(s) en attente`
+      : `Initialisation : ${status.warmup_remaining} source(s) en attente`;
     $('status-dot').className = `status-dot ${phase === 'watching' || (phase === 'polling' && status.seeded) ? 'active' : (phase === 'error' || phase === 'blocked') ? 'error' : 'warning'}`;
     $('phase-message').textContent = status.message || 'En attente de nouvelles offres.';
     $('last-success').textContent = time(status.last_success_at);
@@ -438,9 +441,19 @@
     const sources = Array.isArray(next.sources) ? next.sources : [];
     $('sources-summary').textContent = `${sources.filter((s) => s.ready).length}/${sources.length} références reçues`;
     const sourceCount = Math.max(1, sources.length);
-    const minCycle = effectiveInterval * sourceCount;
-    const measuredCycle = number(status.last_attempt_interval_seconds) === null ? null : status.last_attempt_interval_seconds * sourceCount;
-    $('sources-cadence').textContent = `${sourceCount} source(s) en rotation · budget commun : au plus une requête toutes les ${duration(effectiveInterval)}${adaptedCadence ? ' (cadence adaptée)' : ''} · minimum réglé ${duration(configuredInterval)} · cycle au minimum ${duration(minCycle)}${measuredCycle === null ? '' : `, estimation avec le dernier intervalle : ${duration(measuredCycle)}`}, hors pauses et erreurs. ${integer.format(rateLimitCount)} limitation(s) de quota depuis le lancement. Une arme n’est pas interrogée à chaque seconde. ${integer.format(number(status.ignored_stale) ?? 0)} observation(s) plus ancienne(s) ignorée(s).`;
+    const budgetDescription = `Budget commun : au plus une requête toutes les ${duration(effectiveInterval)}${adaptedCadence ? ' (cadence adaptée)' : ''} · minimum réglé ${duration(configuredInterval)}.`;
+    let sourceCadence;
+    if (priorityCollection) {
+      const weaponSourceCount = sources.filter((source) => String(source.source || source.id || '').startsWith('weapon:')).length || watches.length;
+      const searchGap = Math.max(30, number(config.search_gap_seconds) ?? 30);
+      const minimumWeaponCycle = weaponSourceCount * Math.max(searchGap, effectiveInterval);
+      sourceCadence = `Flux récent prioritaire ; une seule recherche complémentaire au maximum toutes les ${duration(searchGap)}, en alternant les ${weaponSourceCount} armes. Une même arme est donc recherchée au mieux toutes les ${duration(minimumWeaponCycle)} ; les requêtes intercalées, lenteurs et pauses peuvent allonger ce délai. Les références se remplissent progressivement, pendant que le flux récent continue. Les changements de prix des anciennes offres peuvent attendre ce passage.`;
+    } else {
+      const minCycle = effectiveInterval * sourceCount;
+      const measuredCycle = number(status.last_attempt_interval_seconds) === null ? null : status.last_attempt_interval_seconds * sourceCount;
+      sourceCadence = `${sourceCount} source(s) en rotation · cycle au minimum ${duration(minCycle)}${measuredCycle === null ? '' : `, estimation avec le dernier intervalle : ${duration(measuredCycle)}`}, hors pauses et erreurs. Une arme n’est pas interrogée à chaque seconde.`;
+    }
+    $('sources-cadence').textContent = `${sourceCadence} ${budgetDescription} ${integer.format(rateLimitCount)} limitation(s) de quota depuis le lancement. ${integer.format(number(status.ignored_stale) ?? 0)} observation(s) plus ancienne(s) ignorée(s).`;
     const sourcesSignature = JSON.stringify(sources);
     if (sourcesSignature !== lastSourcesSignature) {
       const rows = document.createDocumentFragment();

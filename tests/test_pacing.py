@@ -126,7 +126,7 @@ class PacingSchedulerTests(unittest.TestCase):
             def set(self):
                 pass
 
-        monitor = Monitor(Settings(), ":memory:", client=Client())
+        monitor = Monitor(Settings(collection_mode="hybrid"), ":memory:", client=Client())
         self.addCleanup(monitor.close)
         monitor.stop_event = Wait()
         with patch("riven_sniper.core.time.monotonic", side_effect=lambda: now[0]), contextlib.redirect_stdout(io.StringIO()):

@@ -132,7 +132,7 @@ class RoutingTests(unittest.TestCase):
             def is_set(self): return len(calls) >= 12
             def wait(self, delay=None): now[0] += delay or 0
             def set(self): pass
-        monitor = Monitor(Settings(), ":memory:", client=Client())
+        monitor = Monitor(Settings(collection_mode="hybrid"), ":memory:", client=Client())
         self.addCleanup(monitor.close)
         monitor.stop_event = Wait()
         with patch("riven_sniper.core.time.monotonic", side_effect=lambda: now[0]):
