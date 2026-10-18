@@ -26,7 +26,7 @@ import httpx
 import certifi
 
 API_URL = "https://api.warframe.market/v1/auctions"
-VERSION = "0.4.0"
+VERSION = "0.4.1"
 SEARCH_URL = API_URL + "/search"
 
 
@@ -187,6 +187,46 @@ def retry_delay(value: str | None, now: datetime | None = None) -> float | None:
         except (ValueError, TypeError, OverflowError):
             return None
     return max(0.0, seconds) if math.isfinite(seconds) else None
+
+
+class PollPacing:
+    """One adaptive request budget for every marketplace source."""
+
+    def __init__(self, base_interval: float, learned_interval: float | None = None):
+        self.base_interval = base_interval
+        self.ceiling = max(60.0, base_interval)
+        self.effective_interval = base_interval
+        if isinstance(learned_interval, (int, float)) and not isinstance(learned_interval, bool) and math.isfinite(learned_interval) and learned_interval >= base_interval:
+            self.effective_interval = min(self.ceiling, learned_interval)
+        self.quota_hits = 0
+        self.quota_level = 0
+        self.stable_since: float | None = None
+        self.stable_successes = 0
+
+    def quota(self, retry_after: float | None, now: float) -> tuple[float, str]:
+        self.quota_hits += 1
+        self.quota_level += 1
+        self.stable_since = None
+        self.stable_successes = 0
+        self.effective_interval = min(self.ceiling, self.effective_interval * 2)
+        if retry_after is not None:
+            # A valid server delay replaces the local exponential fallback.
+            # Never cap or shorten it, even if it exceeds our local ceiling.
+            return max(retry_after, self.effective_interval), "server" if retry_after >= self.effective_interval else "quota"
+        fallback = min(120.0, 15.0 * 2 ** min(self.quota_level - 1, 3))
+        return max(fallback, self.effective_interval), "quota"
+
+    def success(self, now: float) -> None:
+        if self.stable_since is None:
+            self.stable_since = now
+        self.stable_successes += 1
+        # A single successful request does not demonstrate a sustainable rate.
+        if self.stable_successes >= 60 and now - self.stable_since >= 120:
+            reduced = max(self.base_interval, round(self.effective_interval * 0.9, 3))
+            self.effective_interval = self.base_interval if reduced - self.base_interval < 0.05 else reduced
+            self.quota_level = 0
+            self.stable_since = now
+            self.stable_successes = 0
 
 
 class MarketClient:
@@ -366,6 +406,11 @@ class Monitor:
                 aleca_seen_at TEXT, lead_seconds REAL
             );
             CREATE INDEX IF NOT EXISTS events_by_listing ON events(id, event_id DESC);
+            CREATE TABLE IF NOT EXISTS collector_pacing (
+                singleton INTEGER PRIMARY KEY CHECK(singleton=1),
+                interval_seconds REAL NOT NULL, cooldown_until REAL,
+                reason TEXT, server_retry_after REAL
+            );
         """)
         columns = {row[1] for row in self.db.execute("PRAGMA table_info(events)")}
         for name, declaration in {"details_json": "TEXT NOT NULL DEFAULT '{}'", "trading_message": "TEXT",
@@ -375,6 +420,9 @@ class Monitor:
         if "revision" not in {row[1] for row in self.db.execute("PRAGMA table_info(seen)")}:
             self.db.execute("ALTER TABLE seen ADD COLUMN revision REAL")
         self.db.commit()
+        pacing = self.db.execute("SELECT * FROM collector_pacing WHERE singleton=1").fetchone()
+        self.pacing = PollPacing(settings.interval_seconds, pacing["interval_seconds"] if pacing else None)
+        self.pacing_deadline = pacing["cooldown_until"] if pacing else None
         from .notifications import DiscordDispatcher
         self.discord = DiscordDispatcher(self.db, self.lock, config_path=discord_config_path,
                                          demo=demo, transport=discord_transport)
@@ -385,6 +433,9 @@ class Monitor:
             "returned_count": 0,
             "started_at": utc_now(), "successful_polls": 0, "failed_polls": 0,
             "consecutive_failures": 0, "backoff_seconds": 0,
+            "effective_interval_seconds": self.pacing.effective_interval,
+            "rate_limit_count": 0, "server_retry_after_seconds": pacing["server_retry_after"] if pacing else None,
+            "backoff_reason": pacing["reason"] if pacing else None, "quota_pause_seconds": None,
             "last_error": None, "last_error_at": None, "last_error_kind": None,
             "last_http_status": None, "last_attempt_ms": None,
             "last_error_details": None,
@@ -405,6 +456,13 @@ class Monitor:
     def source_label(self, source: str) -> str:
         watch = self.settings.watch_for(source.removeprefix("weapon:"))
         return "Recherche " + watch.label if watch else "Flux récent global"
+
+    def save_pacing(self, deadline: float | None = None, *, reason: str | None = None,
+                    retry_after: float | None = None) -> None:
+        with self.lock, self.db:
+            self.db.execute("INSERT OR REPLACE INTO collector_pacing VALUES(1, ?, ?, ?, ?)",
+                            (self.pacing.effective_interval, deadline, reason, retry_after))
+            self.pacing_deadline = deadline
 
     def ingest(self, auctions: list[dict[str, Any]], request_ms: float, *, observed_at: str | None = None,
                source: str = "recent", response_meta: dict[str, Any] | None = None) -> int:
@@ -556,6 +614,15 @@ class Monitor:
         previous_start: float | None = None
         cycle = self.settings.sources()
         cursor = 0
+        remaining = max(0, self.pacing_deadline - time.time()) if self.pacing_deadline is not None else 0
+        if remaining:
+            with self.lock:
+                self.status.update(phase="backoff", message="Pause de quota conservée après le redémarrage.",
+                                   last_error_kind="quota", backoff_seconds=remaining,
+                                   next_poll_at=datetime.fromtimestamp(self.pacing_deadline, timezone.utc).isoformat(timespec="milliseconds"))
+            self.stop_event.wait(remaining)
+            if self.stop_event.is_set():
+                return
         while not self.stop_event.is_set():
             started = time.monotonic()
             source = cycle[cursor % len(cycle)]
@@ -574,21 +641,36 @@ class Monitor:
                 auctions, elapsed = self.client.search(source=source)
                 self.ingest(auctions, elapsed, source=source, response_meta=getattr(self.client, "last_response_meta", {}))
                 failures = 0
-                delay = max(0, self.settings.interval_seconds - (time.monotonic() - started))
+                old_interval = self.pacing.effective_interval
+                self.pacing.success(started)
+                if old_interval != self.pacing.effective_interval or self.pacing_deadline is not None:
+                    self.save_pacing()
+                delay = max(0, self.pacing.effective_interval - (time.monotonic() - started))
                 with self.lock:
                     self.status.update(phase="watching", message=self.source_label(source) + " : réponse valide reçue. Consulter les limites de chaque source ci-dessous.",
                                        successful_polls=self.status["successful_polls"] + 1,
                                        consecutive_failures=0, request_in_flight=False, last_attempt_ms=elapsed,
+                                       effective_interval_seconds=self.pacing.effective_interval,
+                                       server_retry_after_seconds=None, backoff_reason=None,
                                        last_error=None, last_error_kind=None, last_error_details=None)
                     self.status.update(getattr(self.client, "last_response_meta", {}))
             except ApiFailure as exc:
                 failures += 1
-                delay = max(exc.retry_after or 0, min(120, 2 ** min(failures, 7)), self.settings.interval_seconds)
+                quota = exc.kind == "quota" or exc.http_status == 429
+                if quota:
+                    delay, reason = self.pacing.quota(exc.retry_after, started)
+                    self.save_pacing(time.time() + delay, reason=reason, retry_after=exc.retry_after)
+                else:
+                    delay = max(exc.retry_after or 0, min(120, 2 ** min(failures, 7)), self.pacing.effective_interval)
+                    reason = "server" if exc.retry_after is not None and exc.retry_after >= delay else "network"
                 with self.lock:
                     self.source_status[source]["last_error"] = str(exc)
                     self.status.update(phase="blocked" if exc.blocked else "backoff", message=str(exc),
                                        failed_polls=self.status["failed_polls"] + 1,
                                        consecutive_failures=failures, last_error=str(exc), last_error_at=utc_now(),
+                                       effective_interval_seconds=self.pacing.effective_interval,
+                                       rate_limit_count=self.pacing.quota_hits, server_retry_after_seconds=exc.retry_after,
+                                       backoff_reason=reason, quota_pause_seconds=delay if quota else self.status["quota_pause_seconds"],
                                        last_error_kind=exc.kind, last_http_status=exc.http_status,
                                        last_error_details=safe_failure_details(exc),
                                        last_attempt_ms=exc.duration_ms if exc.duration_ms is not None else round((time.perf_counter() - attempt_clock) * 1000, 2),
@@ -598,6 +680,8 @@ class Monitor:
                         self.status.update(meta)
                 print(json.dumps({"event": "api_failure", "at": self.status["last_error_at"],
                                   "message": str(exc), "kind": exc.kind, "http_status": exc.http_status,
+                                  "effective_interval_seconds": self.pacing.effective_interval,
+                                  "server_retry_after_seconds": exc.retry_after, "backoff_reason": reason,
                                   "failed_attempts": failures, "retry_in_seconds": None if exc.blocked else delay}, ensure_ascii=False), flush=True)
                 if exc.blocked:
                     self.stop_event.wait()

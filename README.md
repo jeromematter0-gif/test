@@ -1,4 +1,4 @@
-# Riven Sniper · version 0.4.0
+# Riven Sniper · version 0.4.1
 
 Cinq recherches PC, une rotation de sources sous un budget réseau commun et des alertes Discord avec les détails du Riven et le message `/w` prêt à copier.
 
@@ -19,7 +19,7 @@ Aucun filtre de statistiques, rolls, polarité ou présence du vendeur. Un prix 
 1. Arrêter l'ancienne fenêtre du programme avec **Ctrl+C**.
 2. Extraire le nouveau ZIP dans un nouveau dossier.
 3. Avec Python **3.11 ou plus récent** installé, double-cliquer sur **`Lancer-Riven-Sniper.cmd`**. Il prépare les dépendances et ouvre le tableau local.
-4. Vérifier le repère **04** en haut du tableau, les cinq seuils et la section **Sources de détection**.
+4. Vérifier le repère **04.1** en haut du tableau, les cinq seuils et la section **Sources de détection**.
 
 Conserver la fenêtre de commande ouverte pendant la surveillance. Le navigateur peut ensuite être fermé : les alertes Discord continuent tant que le programme et le PC restent actifs.
 
@@ -75,7 +75,13 @@ La section **Sources de détection** montre la dernière réponse de chaque sour
 
 Une attente réseau côté Discord ne conserve pas le verrou du collecteur et ne bloque pas la collecte. Une file de messages peut néanmoins retarder les alertes Discord en cas de rafale ou de limitation.
 
-Cadence de collecte cible : une requête par seconde, séquentielle. Une réponse de 2,8 secondes implique un intervalle réel d'au moins 2,8 secondes. Les erreurs transitoires entraînent des pauses progressives ; `Retry-After` est respecté. La confiance HTTPS conserve les certificats système et ajoute `certifi`, avec vérification du certificat et du nom d'hôte.
+La cadence de départ est d'une requête par seconde, séquentielle. Une réponse de 2,8 secondes implique un intervalle réel d'au moins 2,8 secondes. Depuis la version 0.4.1, chaque refus de quota **429** double l'intervalle de reprise commun (2 s, 4 s, etc., jusqu'à 60 s pour le réglage par défaut). Une réponse réussie isolée ne l'annule plus. Après au moins 60 succès et deux minutes sans nouveau 429, cet intervalle diminue de 10 %, puis attend une nouvelle période stable avant de diminuer encore. Cela cherche une cadence soutenable ; ce n'est pas une garantie de quota disponible.
+
+Si le serveur fournit `Retry-After`, sa durée est respectée intégralement, même au-delà de 120 secondes. Elle remplace le délai exponentiel local ; la cadence adaptée peut néanmoins imposer une attente plus longue. Sans cette indication, la pause de quota est calculée localement : 15 s, puis 30 s, 60 s et 120 s si les refus persistent avant une période stable. Les autres erreurs transitoires gardent leur attente progressive. Le tableau distingue délai serveur, pause locale, cadence configurée et cadence adaptée. La cadence apprise et l'échéance de pause sont conservées dans la base SQLite : redémarrer ne supprime pas un délai encore en cours.
+
+À 2 s entre requêtes, un cycle des six sources prend au minimum **12 secondes**, hors lenteur réseau et erreurs. La version 0.4.1 privilégie une reprise durable après les refus plutôt que le retour immédiat à 1 s qui entretenait les pauses. Le nombre de sources n'a pas multiplié le budget global de requêtes. Les quotas peuvent dépendre du service, de l'endpoint ou des autres outils : leur portée exacte n'est pas déterminée ici. Pour isoler un conflit éventuel, comparer une session avec Riven Sniper seul, AlecaFrame et WF Helper arrêtés, après la fin de la pause affichée.
+
+La confiance HTTPS conserve les certificats système et ajoute `certifi`, avec vérification du certificat et du nom d'hôte.
 
 Discord est limité à au plus deux envois par seconde par ce programme ; ses indications de quota et ses `429` sont respectés. Les messages en attente survivent au redémarrage avec le même webhook. Désactiver Discord suspend les envois et n'ajoute pas de nouvelles alertes dans la file. Changer de webhook annule les messages en attente de l'ancien salon. Une alerte en attente depuis plus de dix minutes expire pour éviter un rattrapage d'offres anciennes. Le tableau affiche les envois, les attentes, les erreurs et les expirations.
 
@@ -123,7 +129,7 @@ python -m riven_sniper --weapon dual_toxocyst --min-price 10 --max-price 2000 --
 
 `--collection hybrid` est le nouveau mode par défaut (six sources). `--collection weapons` consulte uniquement les cinq recherches par arme ; `--collection recent` rétablit l'ancien flux global seul. Ces modes partagent tous le même budget de requêtes. Ils peuvent servir à comparer les comportements, sans lancer plusieurs instances en parallèle. Le diagnostic simple fait un seul appel au flux global ; l'état des autres sources est visible dans le tableau après démarrage.
 
-Validation : **83 tests** couvrent notamment un Burston ancien passant de 800 à 400 pl en dehors du flux récent, un Torid présent dans la recherche avant le flux global, les références initiales silencieuses, l'unicité des alertes entre sources, le rejet des réponses plus anciennes et le budget commun. Ces cas sont simulés et ne prouvent pas que l'annonce réelle signalée par l'utilisateur sera renvoyée par l'API. Les tests précédents de filtrage, migration, diagnostic et envoi Discord sont conservés. Aucun vrai webhook utilisateur n'est employé dans les tests ; la réception réelle doit être validée sur le PC. Les lanceurs Windows n'ont pas été exécutés dans ce cloud Linux.
+Validation : **98 tests** couvrent notamment un Burston ancien passant de 800 à 400 pl en dehors du flux récent, un Torid présent dans la recherche avant le flux global, les références initiales silencieuses, l'unicité des alertes entre sources, le rejet des réponses plus anciennes et le budget commun. Ces cas sont simulés et ne prouvent pas que l'annonce réelle signalée par l'utilisateur sera renvoyée par l'API. Les scénarios de quota vérifient notamment `429 → succès → 429`, le respect d’un délai serveur de 3 600 s, la récupération progressive et la pause persistante au redémarrage. Les tests précédents de filtrage, migration, diagnostic et envoi Discord sont conservés. Aucun vrai webhook utilisateur n'est employé dans les tests ; la réception réelle doit être validée sur le PC. Les lanceurs Windows n'ont pas été exécutés dans ce cloud Linux.
 
 ## Source et limites
 

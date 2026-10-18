@@ -12,7 +12,7 @@
   <body>
     <div class="app-shell">
       <header class="topbar">
-        <a class="brand" href="/" aria-label="Riven Sniper, accueil"><span class="brand-mark" aria-hidden="true">⌖</span><span>RIVEN<span class="brand-light">SNIPER</span></span><span class="version">04</span></a>
+        <a class="brand" href="/" aria-label="Riven Sniper, accueil"><span class="brand-mark" aria-hidden="true">⌖</span><span>RIVEN<span class="brand-light">SNIPER</span></span><span class="version">04.1</span></a>
         <div class="header-meta"><span class="platform">PC <span aria-hidden="true">/</span> CROSS-SAVE</span><span id="mode-badge" class="mode-badge">CONNEXION</span></div>
       </header>
 
@@ -37,7 +37,7 @@
 
         <section class="watch-config multi-watch" aria-label="Recherches surveillées">
           <div class="watch-overview"><span class="field-label">VOS RECHERCHES · PRIX IMMÉDIATS INCLUS</span><h2 id="watch-count">5 armes surveillées</h2><span class="weapon-detail">Toutes statistiques · tous les rolls · vendeurs en ligne ou hors ligne</span></div>
-          <div class="watch-cadence"><span class="field-label">ÉTAT DE LA COLLECTE</span><div id="interval">Connexion…</div><span class="weapon-detail" id="cadence-detail">cadence cible : 1 s si les requêtes réussissent</span></div>
+          <div class="watch-cadence"><span class="field-label">ÉTAT DE LA COLLECTE</span><div id="interval">Connexion…</div><span class="weapon-detail" id="cadence-detail">La cadence s’adapte aux limitations de l’API.</span></div>
           <div id="watch-list" class="watch-list"></div>
         </section>
         <p id="coverage-warning" class="coverage-warning">Flux récent et recherches par arme partagent le même budget réseau. La couverture dépend du cache et des limites de chaque réponse.</p>
@@ -47,6 +47,7 @@
           <p id="sources-cadence">Les sources sont interrogées en rotation, sans requêtes parallèles.</p>
           <div class="table-wrap"><table><thead><tr><th>SOURCE</th><th>DERNIÈRE RÉPONSE</th><th>RÉSULTATS</th><th>DERNIÈRE VARIATION</th><th>ÉTAT</th></tr></thead><tbody id="sources-body"></tbody></table></div>
           <p class="sources-help">Une réponse réussie confirme l’accès, pas une couverture exhaustive. Une recherche triée par prix peut être limitée : une offre absente des résultats restera manquée. La variation suit les identifiants, prix et dates d’édition reçus ; une réponse inchangée n’est pas une preuve de cache.</p>
+          <p class="sources-help">Si AlecaFrame ou WF Helper utilisent la même API en parallèle, leurs requêtes peuvent partager le quota de votre adresse IP. Lancer plusieurs scripts ne donne pas de quota supplémentaire.</p>
         </section>
 
         <details id="discord-settings" class="discord-panel" open>

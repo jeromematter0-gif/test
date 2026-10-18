@@ -351,6 +351,11 @@
     const config = next.config || {};
     const watches = Array.isArray(config.watches) ? config.watches : [];
     const status = next.status || {};
+    const configuredInterval = number(config.interval_seconds) ?? 1;
+    const effectiveInterval = number(status.effective_interval_seconds) ?? configuredInterval;
+    const adaptedCadence = effectiveInterval > configuredInterval;
+    const rateLimitCount = number(status.rate_limit_count) ?? 0;
+    const quotaBackoff = status.phase === 'backoff' && (status.last_error_kind === 'quota' || status.last_http_status === 429);
     const comparison = next.comparison || {};
     const isDemo = next.mode === 'demo';
     const offers = next.offers;
@@ -368,6 +373,7 @@
     $('demo-banner').hidden = !isDemo;
     const phase = status.phase || 'starting';
     $('phase-label').textContent = { starting: 'Connexion à l’API', polling: 'Requête API en cours', watching: isDemo ? 'Simulation en cours' : 'Surveillance active', backoff: 'Collecte en échec · nouvelle tentative prévue', blocked: 'Accès à l’API bloqué', error: 'Surveillance interrompue' }[phase] || 'État de la surveillance';
+    if (quotaBackoff) $('phase-label').textContent = 'Quota API · reprise prévue';
     if (phase === 'watching' && status.warmup_remaining > 0) $('phase-label').textContent = `Initialisation : ${status.warmup_remaining} source(s) en attente`;
     $('status-dot').className = `status-dot ${phase === 'watching' || (phase === 'polling' && status.seeded) ? 'active' : (phase === 'error' || phase === 'blocked') ? 'error' : 'warning'}`;
     $('phase-message').textContent = status.message || 'En attente de nouvelles offres.';
@@ -376,7 +382,8 @@
     const cacheAge = number(status.api_cache_age_seconds);
     const cacheControl = typeof status.api_cache_control === 'string' ? status.api_cache_control : '';
     $('cache-info').hidden = cacheAge === null && !cacheControl;
-    $('cache-info').textContent = `${cacheAge === null ? '' : `Âge du cache API : ${duration(cacheAge)}`}${cacheAge !== null && cacheControl ? ' · ' : ''}${cacheControl}`;
+    const cachePolicy = cacheControl ? (/\bno-store\b/i.test(cacheControl) ? 'Réponse annoncée sans stockage en cache' : 'Politique de cache déclarée par l’API') : '';
+    $('cache-info').textContent = `${cacheAge === null ? '' : `Âge du cache API : ${duration(cacheAge)}`}${cacheAge !== null && cachePolicy ? ' · ' : ''}${cachePolicy}`;
     const nextWatchSignature = JSON.stringify(watches);
     if (nextWatchSignature !== watchSignature) {
       watchSignature = nextWatchSignature;
@@ -412,22 +419,28 @@
     const nextAttempt = date(status.next_poll_at);
     const clockNow = date(next.clock) || new Date();
     const secondsUntilRetry = nextAttempt ? Math.max(0, Math.ceil((nextAttempt - clockNow) / 1000)) : null;
+    const retryDetail = status.backoff_reason === 'server'
+      ? `Délai demandé par l’API${number(status.server_retry_after_seconds) === null ? '' : ` : ${duration(status.server_retry_after_seconds)}`}.`
+      : status.backoff_reason === 'quota'
+        ? `Pause locale après quota atteint${number(status.quota_pause_seconds) === null ? '' : ` : ${duration(status.quota_pause_seconds)}`}.`
+        : status.backoff_reason === 'network' ? 'Pause après une erreur transitoire.' : '';
     const failedCollection = ['backoff', 'blocked', 'error'].includes(phase);
     $('api-error-banner').hidden = !failedCollection;
     if (failedCollection) {
-      $('api-error-banner').textContent = `${status.seeded ? 'La collecte ne reçoit plus de données.' : 'Surveillance non opérationnelle : aucune réponse API valide reçue.'} ${status.message || ''}${phase === 'backoff' && secondsUntilRetry !== null ? ` Prochaine tentative dans ${integer.format(secondsUntilRetry)} s.` : ' Collecte arrêtée.'}`;
+      $('api-error-banner').textContent = `${status.seeded ? 'La collecte ne reçoit plus de données.' : 'Surveillance non opérationnelle : aucune réponse API valide reçue.'} ${status.message || ''}${phase === 'backoff' ? `${retryDetail ? ` ${retryDetail}` : ''}${secondsUntilRetry === null ? ' Prochaine tentative en attente.' : ` Prochaine tentative dans ${integer.format(secondsUntilRetry)} s.`}${quotaBackoff ? ` ${integer.format(rateLimitCount)} limitation(s) de quota depuis le lancement. La cadence de reprise est de ${duration(effectiveInterval)}.` : ''}` : ' Collecte arrêtée.'}`;
     }
-    $('interval').textContent = phase === 'backoff' ? 'En pause' : ['blocked', 'error'].includes(phase) ? 'Arrêtée' : !status.seeded ? 'Connexion…' : `${duration(config.interval_seconds)} cible`;
+    $('interval').textContent = phase === 'backoff' ? 'En pause' : ['blocked', 'error'].includes(phase) ? 'Arrêtée' : !status.seeded ? 'Connexion…' : `${duration(effectiveInterval)}${adaptedCadence ? ' adaptée' : ' cible'}`;
+    const cadenceDetail = `Minimum réglé ${duration(configuredInterval)} · cadence ${duration(effectiveInterval)}${adaptedCadence ? ' adaptée' : ''}${number(status.last_attempt_interval_seconds) === null ? '' : ` · dernier intervalle ${duration(status.last_attempt_interval_seconds)}`}`;
     $('cadence-detail').textContent = phase === 'backoff'
-      ? `Nouvel essai ${secondsUntilRetry === null ? 'en attente' : `dans ${integer.format(secondsUntilRetry)} s`} · cible ${duration(config.interval_seconds)}`
+      ? `Nouvel essai ${secondsUntilRetry === null ? 'en attente' : `dans ${integer.format(secondsUntilRetry)} s`} · ${cadenceDetail}`
       : ['blocked', 'error'].includes(phase) ? 'aucune surveillance effective'
-      : `Cadence cible hors erreurs${number(status.last_attempt_interval_seconds) === null ? '' : ` · dernier intervalle ${duration(status.last_attempt_interval_seconds)}`}`;
+      : cadenceDetail;
     const sources = Array.isArray(next.sources) ? next.sources : [];
     $('sources-summary').textContent = `${sources.filter((s) => s.ready).length}/${sources.length} références reçues`;
     const sourceCount = Math.max(1, sources.length);
-    const minCycle = (number(config.interval_seconds) ?? 1) * sourceCount;
+    const minCycle = effectiveInterval * sourceCount;
     const measuredCycle = number(status.last_attempt_interval_seconds) === null ? null : status.last_attempt_interval_seconds * sourceCount;
-    $('sources-cadence').textContent = `${sourceCount} source(s) en rotation · budget commun : au plus une requête toutes les ${duration(config.interval_seconds)} · cycle au minimum ${duration(minCycle)}${measuredCycle === null ? '' : `, estimation avec le dernier intervalle : ${duration(measuredCycle)}`}. Une arme n’est pas interrogée à chaque seconde. ${integer.format(number(status.ignored_stale) ?? 0)} observation(s) plus ancienne(s) ignorée(s).`;
+    $('sources-cadence').textContent = `${sourceCount} source(s) en rotation · budget commun : au plus une requête toutes les ${duration(effectiveInterval)}${adaptedCadence ? ' (cadence adaptée)' : ''} · minimum réglé ${duration(configuredInterval)} · cycle au minimum ${duration(minCycle)}${measuredCycle === null ? '' : `, estimation avec le dernier intervalle : ${duration(measuredCycle)}`}, hors pauses et erreurs. ${integer.format(rateLimitCount)} limitation(s) de quota depuis le lancement. Une arme n’est pas interrogée à chaque seconde. ${integer.format(number(status.ignored_stale) ?? 0)} observation(s) plus ancienne(s) ignorée(s).`;
     const sourcesSignature = JSON.stringify(sources);
     if (sourcesSignature !== lastSourcesSignature) {
       const rows = document.createDocumentFragment();
