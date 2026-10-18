@@ -1,0 +1,47 @@
+from __future__ import annotations
+
+import argparse
+import webbrowser
+from pathlib import Path
+
+from .core import Monitor, Settings
+from .server import create_server
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Riven Sniper : Dual Toxocyst PC, 10–2 000 pl, alertes locales.")
+    parser.add_argument("--demo", action="store_true", help="Flux simulé, sans appel à warframe.market.")
+    parser.add_argument("--open", action="store_true", help="Ouvrir le tableau de bord dans le navigateur local.")
+    parser.add_argument("--interval", type=float, default=1.0, help="Secondes entre deux débuts de requête (minimum 1).")
+    parser.add_argument("--min-price", type=int, default=10)
+    parser.add_argument("--max-price", type=int, default=2000)
+    parser.add_argument("--port", type=int, default=8765)
+    parser.add_argument("--data-dir", type=Path, default=Path(".riven-sniper"))
+    args = parser.parse_args()
+    try:
+        settings = Settings(min_price=args.min_price, max_price=args.max_price, interval_seconds=args.interval)
+    except ValueError as exc:
+        parser.error(str(exc))
+    args.data_dir.mkdir(parents=True, exist_ok=True)
+    monitor = Monitor(settings, args.data_dir / ("demo.sqlite3" if args.demo else "live.sqlite3"), demo=args.demo)
+    try:
+        server = create_server(monitor, args.port)
+    except OSError as exc:
+        monitor.close()
+        parser.error(f"Port indisponible ({exc}). Fermer l'autre instance ou choisir --port.")
+    print(f"Riven Sniper — {'SIMULATION' if args.demo else 'API réelle'} — Dual Toxocyst — {args.min_price}–{args.max_price} pl", flush=True)
+    print(f"Tableau local sur le port {server.server_port}. Arrêt : Ctrl+C. Ouvrir avec --open sur votre PC.", flush=True)
+    monitor.start()
+    if args.open:
+        webbrowser.open(f"http://127.0.0.1:{server.server_port}")
+    try:
+        server.serve_forever(poll_interval=0.2)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        server.server_close()
+        monitor.close()
+
+
+if __name__ == "__main__":
+    main()
