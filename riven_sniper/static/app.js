@@ -438,6 +438,17 @@
       ? `Nouvel essai ${secondsUntilRetry === null ? 'en attente' : `dans ${integer.format(secondsUntilRetry)} s`} · ${cadenceDetail}`
       : ['blocked', 'error'].includes(phase) ? 'aucune surveillance effective'
       : cadenceDetail;
+    const recovery = status.recovery || {};
+    $('recovery-info').hidden = !recovery.active;
+    if (recovery.active) {
+      const successes = number(recovery.successes) ?? 0;
+      const required = number(recovery.required_successes) ?? 3;
+      const remaining = Math.max(0, Math.ceil((number(recovery.required_seconds) ?? 120) - (number(recovery.stable_seconds) ?? 0)));
+      const progress = `${integer.format(successes)}/${integer.format(required)} réponses valides minimum · ${integer.format(remaining)} s de stabilité restantes`;
+      $('recovery-info').textContent = ['backoff', 'blocked', 'error'].includes(phase)
+        ? 'Récupération de la cadence suspendue pendant l’interruption de la collecte. Le délai demandé par l’API reste respecté.'
+        : `Récupération progressive : ${progress}. Prochaine cadence visée : ${duration(recovery.next_interval_seconds)}, appliquée après une réponse valide si les deux conditions sont remplies. Toute erreur recommence cette période.`;
+    }
     const sources = Array.isArray(next.sources) ? next.sources : [];
     $('sources-summary').textContent = `${sources.filter((s) => s.ready).length}/${sources.length} références reçues`;
     const sourceCount = Math.max(1, sources.length);

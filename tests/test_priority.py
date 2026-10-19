@@ -103,7 +103,7 @@ class PrioritySchedulerTests(unittest.TestCase):
         self.assertAlmostEqual(calls[2][1], 36)
         self.assertAlmostEqual(calls[3][1], 37)
 
-    def test_restored_eight_second_budget_is_retained_for_every_source(self):
+    def test_restored_eight_second_budget_is_retained_before_stable_recovery(self):
         class Client:
             def close(self):
                 pass
@@ -116,7 +116,8 @@ class PrioritySchedulerTests(unittest.TestCase):
                 original.save_pacing()
             finally:
                 original.close()
-            calls, _, state = self.run_scenario(attempts=20, database=database)
+            # These 12 attempts cover 88 s, before the 120 s recovery window.
+            calls, _, state = self.run_scenario(attempts=12, database=database)
             self.assertEqual(state["status"]["effective_interval_seconds"], 8)
             self.assertTrue(all(later[1] - earlier[1] >= 8 for earlier, later in zip(calls, calls[1:])))
             recent_starts = [started for source, started in calls if source == "recent"]

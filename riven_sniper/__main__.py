@@ -51,6 +51,7 @@ def main() -> None:
         parser.error(f"Port indisponible ({exc}). Fermer l'autre instance ou choisir --port.")
     print(f"Riven Sniper — {'SIMULATION' if args.demo else 'API réelle'} — " + ", ".join(f"{w.label} {w.min_price}–{w.max_price} pl" for w in settings.watches), flush=True)
     print(f"Tableau local sur le port {server.server_port}. Arrêt : Ctrl+C. Ouvrir avec --open sur votre PC.", flush=True)
+    print("Une ligne d'état s'affiche toutes les 30 secondes, même sans nouvelle offre.", flush=True)
     monitor.start()
     if args.open:
         webbrowser.open(f"http://127.0.0.1:{server.server_port}")

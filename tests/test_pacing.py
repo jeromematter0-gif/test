@@ -46,11 +46,11 @@ class PollPacingTests(unittest.TestCase):
         self.assertEqual(pacing.effective_interval, 2)
 
         pacing.success(now=120)
-        self.assertAlmostEqual(pacing.effective_interval, 1.8)
+        self.assertEqual(pacing.effective_interval, 1)
         self.assertEqual(pacing.quota_level, 0)
         self.assertEqual(pacing.quota_hits, 1)
         pacing.success(now=121)
-        self.assertAlmostEqual(pacing.effective_interval, 1.8)
+        self.assertEqual(pacing.effective_interval, 1)
 
     def test_elapsed_time_alone_is_insufficient_for_recovery(self):
         pacing = PollPacing(1)
@@ -59,9 +59,8 @@ class PollPacingTests(unittest.TestCase):
         pacing.success(now=125)
         self.assertEqual(pacing.effective_interval, 2)
 
-        for _ in range(58):
-            pacing.success(now=125)
-        self.assertAlmostEqual(pacing.effective_interval, 1.8)
+        pacing.success(now=125)
+        self.assertEqual(pacing.effective_interval, 1)
 
     def test_new_quota_resets_stability_window_and_success_count(self):
         pacing = PollPacing(1)
@@ -74,7 +73,7 @@ class PollPacingTests(unittest.TestCase):
         self.assertEqual(pacing.effective_interval, 4)
 
         pacing.success(now=181)
-        self.assertAlmostEqual(pacing.effective_interval, 3.6)
+        self.assertEqual(pacing.effective_interval, 2)
         self.assertEqual(pacing.quota_hits, 2)
 
     def test_recovery_never_goes_faster_than_user_configured_interval(self):

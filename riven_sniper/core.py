@@ -26,9 +26,11 @@ import httpx
 import certifi
 
 API_URL = "https://api.warframe.market/v1/auctions"
-VERSION = "0.4.2"
+VERSION = "0.4.3"
 SEARCH_URL = API_URL + "/search"
 SEARCH_GAP_SECONDS = 30.0
+RECOVERY_SECONDS = 120.0
+RECOVERY_SUCCESSES = 3
 
 
 def utc_now() -> str:
@@ -222,13 +224,26 @@ class PollPacing:
         if self.stable_since is None:
             self.stable_since = now
         self.stable_successes += 1
-        # A single successful request does not demonstrate a sustainable rate.
-        if self.stable_successes >= 60 and now - self.stable_since >= 120:
-            reduced = max(self.base_interval, round(self.effective_interval * 0.9, 3))
-            self.effective_interval = self.base_interval if reduced - self.base_interval < 0.05 else reduced
+        # Recovery must depend on elapsed stability, not sixty slow requests.
+        # Both requirements matter: neither one success nor an idle night is proof.
+        if self.stable_successes >= RECOVERY_SUCCESSES and now - self.stable_since >= RECOVERY_SECONDS:
+            self.effective_interval = self.recovery_interval()
             self.quota_level = 0
             self.stable_since = now
             self.stable_successes = 0
+
+    def failure(self) -> None:
+        self.stable_since = None
+        self.stable_successes = 0
+
+    def recovery_interval(self) -> float:
+        return max(self.base_interval, round(self.effective_interval / 2, 3))
+
+    def recovery_status(self, now: float) -> dict[str, Any]:
+        return {"active": self.effective_interval > self.base_interval,
+                "successes": self.stable_successes, "required_successes": RECOVERY_SUCCESSES,
+                "stable_seconds": max(0, round(now - self.stable_since, 1)) if self.stable_since is not None else 0,
+                "required_seconds": RECOVERY_SECONDS, "next_interval_seconds": self.recovery_interval()}
 
 
 class MarketClient:
@@ -455,6 +470,7 @@ class Monitor:
         self.pending_aleca: dict[tuple[str, int], str] = {}
         self.recent_attempts: list[dict[str, Any]] = []
         self.thread: threading.Thread | None = None
+        self.console_thread: threading.Thread | None = None
 
     def source_label(self, source: str) -> str:
         watch = self.settings.watch_for(source.removeprefix("weapon:"))
@@ -568,7 +584,8 @@ class Monitor:
                 offers.append(offer)
             return {
                 "version": VERSION, "mode": "demo" if self.demo else "live", "config": self.settings.public(),
-                "status": dict(self.status), "offers": offers, "discord": self.discord.state(),
+                "status": {**self.status, "recovery": self.pacing.recovery_status(time.monotonic())},
+                "offers": offers, "discord": self.discord.state(),
                 "comparison": {"count": len(comparisons), "median_lead_seconds": statistics.median(comparisons) if comparisons else None,
                                "pending_count": len(self.pending_aleca)},
                 "sources": [dict(s) for s in self.source_status.values()], "clock": utc_now(),
@@ -695,6 +712,7 @@ class Monitor:
                     delay, reason = self.pacing.quota(exc.retry_after, started)
                     self.save_pacing(time.time() + delay, reason=reason, retry_after=exc.retry_after)
                 else:
+                    self.pacing.failure()
                     delay = max(exc.retry_after or 0, min(120, 2 ** min(failures, 7)), self.pacing.effective_interval)
                     reason = "server" if exc.retry_after is not None and exc.retry_after >= delay else "network"
                 with self.lock:
@@ -738,11 +756,31 @@ class Monitor:
         self.discord.start()
         self.thread = threading.Thread(target=self.run, name="riven-poller", daemon=True)
         self.thread.start()
+        self.console_thread = threading.Thread(target=self.console_run, name="riven-console", daemon=True)
+        self.console_thread.start()
+
+    def console_run(self) -> None:
+        # Only local counters: no extra API requests, URLs or seller/webhook data.
+        phases = {"starting": "Initialisation", "polling": "Requête en cours", "watching": "Surveillance active",
+                  "backoff": "Collecte en pause", "blocked": "Accès API bloqué", "error": "Collecte arrêtée"}
+        while not self.stop_event.is_set():
+            with self.lock:
+                status = dict(self.status)
+            next_at = status["next_poll_at"]
+            remaining = max(0, math.ceil((parse_time(next_at) - datetime.now(timezone.utc)).total_seconds())) if next_at else None
+            clock = datetime.now().astimezone().strftime("%H:%M:%S")
+            print(f"[{clock}] {phases.get(status['phase'], status['phase'])} | "
+                  f"{status['successful_polls']} réponses valides, {status['failed_polls']} échecs | "
+                  f"intervalle {status['effective_interval_seconds']:g} s"
+                  + (f" | prochain appel dans {remaining} s" if remaining is not None else ""), flush=True)
+            self.stop_event.wait(30)
 
     def close(self) -> None:
         self.stop_event.set()
         if self.thread:
             self.thread.join(timeout=20)
+        if self.console_thread:
+            self.console_thread.join(timeout=2)
         self.discord.close()
         self.client.close()
         self.db.close()
